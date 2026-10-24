@@ -8,7 +8,7 @@ export interface Health {
   status: 'ok'
   demo_mode: boolean
   demo_today: string
-  integrations: { clinic_inventory: 'demo'; email_delivery: 'test_only'; llm: 'live' | 'fallback'; voice: 'live' | 'fallback' }
+  integrations: { clinic_inventory: 'demo'; email_delivery: 'test_only'; llm: 'live' | 'fallback' | 'error'; voice: 'live' | 'fallback' }
 }
 
 export interface Me {
@@ -177,6 +177,8 @@ export interface IntakeSnapshot {
   fields: IntakeField[]
   missing_fields: string[]
   skipped_fields: string[]
+  conversation_state?: string
+  declined?: string[]
 }
 export interface ToolEvent { tool: string; label: string; status: string }
 export interface IntakeReply {
@@ -189,6 +191,9 @@ export interface IntakeReply {
   field_updates: string[]
   missing_fields: string[]
   mode: 'claude' | 'scripted' | 'safety'
+  conversation_state?: string
+  form?: { fields: string[] } | null
+  turn_id?: string | null
 }
 export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
 export interface Handoff { packet_id: string; encounter_id: string; version: number; status: string; shared_at: string; field_keys: string[]; attachment_ids: string[] }

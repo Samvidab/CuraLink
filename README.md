@@ -34,7 +34,7 @@ Reset all demo data any time: `curl -X POST -H 'X-CuraLink-Client: web' http://1
 | Capability | Status |
 |---|---|
 | Role-based access (student / clinician), server-side sessions, cross-role 403, per-encounter assignment scoping | **Functional** |
-| UniTime `.ics` **file import** (no live sync): recurrence expansion, EXDATE, moved meetings (RECURRENCE-ID), cancelled meetings, DST, timezone detection, validation; instructor name/email read from UniTime's ATTENDEE/ORGANIZER fields; course titles from SUMMARY/DESCRIPTION; editable instructors in Settings | **Functional**, tested against a fixture that follows UniTime's export code (`sample_data/unitime_format_sample.ics`) — **not yet tested with a real Purdue export** |
+| UniTime `.ics` **file import** (no live sync) with **semester selection** (terms inferred from each class's meeting dates; other terms kept but hidden), positioned week grid, *Review imported schedule* page; recurrence expansion, EXDATE, moved meetings (RECURRENCE-ID), cancelled meetings, DST, timezone detection, validation; instructor name/email read from UniTime's ATTENDEE/ORGANIZER fields; course titles from SUMMARY/DESCRIPTION; editable instructors in Settings | **Functional**, tested against a fixture that follows UniTime's export code (`sample_data/unitime_format_sample.ics`) — **not yet tested with a real Purdue export** |
 | Slot ranking: hard constraints (class overlap, travel buffer, personal blocks), deterministic scoring with reason codes, stale-slot 409 + replan, idempotent confirm | **Functional** over a **synthetic** clinic inventory (`DEMO` badge everywhere) |
 | Appointment booking | **Simulated** — “Demo appointment — not booked with a real clinic.” |
 | Safety screen (emergency / crisis language → 911 / 988 guidance, routine flow paused) | **Functional**, deterministic, **not clinically validated** |
@@ -44,7 +44,7 @@ Reset all demo data any time: `curl -X POST -H 'X-CuraLink-Client: web' http://1
 | Clinician **Medical Evaluation & Absence Determination**: clinician-only exam findings; *no certificate* / *approve period (dates chosen manually, 1+ days)* / *defer*; class schedule used only after the decision | **Functional**; CuraLink never suggests a duration |
 | Medical certificate (all required fields, configurable wording/branding, demo verification ID), immutable PDF versions (SHA-256), per-version sign with re-authentication + single-use nonce | **Functional**; signatures are hand-drawn (encrypted at rest) or a generated sample, printed as **“SIMULATED SIGNATURE — DEMO, NOT VALID”** |
 | Instructor notices | **Functional** outbox with consent / signature / verified-recipient gates and idempotency; delivered **only to a local test inbox** (`/demo/inbox`), never by email |
-| Photo observations: consent-gated upload, EXIF/GPS stripped, quality checks, tentative allowlisted observations with uncertainty, opt-in sharing to the clinician only | **Functional**. Observer = Claude vision when a key is set, otherwise basic colour analysis (labelled “not a medical model”). Demo images are synthetic |
+| Photo observations: consent-gated upload (**JPG, PNG, WebP, iPhone HEIC/HEIF**, up to 12 MB; type checked from file bytes; HEIC converted server-side; orientation fixed; EXIF/GPS stripped), tentative allowlisted observations with uncertainty, opt-in sharing to the clinician only | **Functional**. Observer = Claude vision when a key is set, otherwise basic colour analysis (labelled “not a medical model”). Demo images are synthetic |
 | Clinician accept / correct / reject of shared fields (original preserved) | **Functional** |
 | Notability import, live UniTime subscription, real clinic/email integrations, Factory/Moss/Fetch.ai | **Not implemented** |
 
@@ -73,6 +73,7 @@ Everything the team must supply by hand is in **[docs/MANUAL_SETUP_CHECKLIST.md]
 
 ## Integration status (be precise when presenting)
 
+- **Assistant without Claude:** a stateful dialog manager (`backend/app/services/dialog.py`) — contextual questions asked once, declines remembered, next steps offered. With Claude it supplies state/context and anti-repeat guards. If Anthropic rejects the key, `/health` reports `"llm":"error"` and the UI says “Claude key rejected · scripted fallback”.
 - **Claude:** code path uses the official `anthropic` SDK (server-only key, `claude-opus-5-5`, strict tools, `fallbacks: "default"`). A contract test runs the real SDK against a local fake API to check the request shape and tool loop. **No live API call has been made from this repo yet** — add a key and run the check below before claiming it live.
 - **Cartesia:** raw WebSocket contract verified against docs.cartesia.ai (STT `ink-whisper`, TTS `sonic-3.6`, `cartesia_version=2026-08-14`, `X-API-Key` header). Barge-in, stale-chunk dropping, history carry-over and latency reporting are tested with simulated streams. **No live Cartesia session has been run yet.** Without a key the UI says “Browser speech · fallback” — that is the browser's own speech engine, never Cartesia.
 

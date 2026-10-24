@@ -9,9 +9,10 @@ import type { Handoff, IntakeSnapshot, PhotoAttachment, Provenance, StudentEncou
 type SummaryItem = { key: string; label: string; display: string; source: string; confirmed: boolean }
 type IntakeSummary = { student_reported: Record<string, SummaryItem[]>; ai_generated: SummaryItem[]; missing: { key: string; label: string }[]; uncertain: { key: string; label: string }[]; disclaimer: string }
 
-export const PROVENANCE: Record<Provenance, string> = { voice: 'Spoken', text: 'Typed in chat', form: 'Entered', photo_observation: 'Image observation', clinician: 'Clinician' }
+export const PROVENANCE: Record<Provenance, string> = { voice: 'Spoken', text: 'Typed in chat', form: 'Entered', photo_observation: 'AI image observation', clinician: 'Clinician' }
 const NEEDS: Record<string, string> = { symptoms_free_text: 'what you’re experiencing', onset_text: 'when it started', temperature: 'temperature' }
 
+const ACCEPT = 'image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif'
 const CATEGORY_LABEL: Record<string, string> = { apparent_swelling: 'Apparent puffiness or asymmetry', red_area_possible_blood: 'Red-appearing area (not verified as blood)', dry_or_flaky_skin: 'Dry or flaky-looking texture', discoloration_possible_bruise: 'Discoloration (cannot confirm bruising)', other: 'Other visible feature' }
 
 export function usePhotos() {
@@ -26,8 +27,11 @@ export function PhotoSection() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const done = () => { qc.invalidateQueries({ queryKey: ['photos'] }); qc.invalidateQueries({ queryKey: ['intake'] }) }
+  const [dragging, setDragging] = useState(false)
   const upload = async (file?: File) => {
     if (!file) return
+    if (!consent) { setError('Tick the photo consent box first.'); return }
+    if (file.size > 12 * 1024 * 1024) { setError(`That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is 12 MB.`); return }
     setBusy(true); setError('')
     const form = new FormData(); form.append('file', file); form.append('consent', String(consent))
     try { await api.post('/vision/observations', form); done() } catch (e) { setError(e instanceof ApiError ? e.message : 'Upload failed.') } finally { setBusy(false) }
@@ -41,11 +45,18 @@ export function PhotoSection() {
     <p className="text-xs leading-5 text-slate-600">CuraLink can describe some visible features, but a photo cannot tell us what is causing them. This is not a diagnosis, and photos will not be shared with your professor. Location and camera data are removed; you decide later whether your clinician sees it.</p>
     <label className="mt-3 flex items-start gap-2 text-xs"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)} className="mt-0.5 size-4 accent-teal-700"/><span>I agree to have this photo analyzed for possible visual observations.</span></label>
     <p className="mt-2 text-[11px] text-slate-500">Tips: good light, in focus, only the area of concern — avoid your face or anything identifying.</p>
-    <div className="mt-3 flex flex-wrap gap-2"><label className={`inline-flex min-h-10 cursor-pointer items-center rounded-xl border border-slate-200 px-3 text-xs font-semibold ${!consent||busy?'pointer-events-none opacity-50':''}`}>Choose or take photo<input type="file" accept="image/jpeg,image/png,image/webp" capture="environment" className="sr-only" disabled={!consent||busy} onChange={e=>upload(e.target.files?.[0])} aria-label="Choose or take a photo"/></label><Button variant="ghost" className="min-h-10 text-xs" disabled={!consent||busy} onClick={()=>demo('red_area')}>Use synthetic demo image</Button></div>
+    <div onDragOver={e=>{e.preventDefault();if(consent)setDragging(true)}} onDragLeave={()=>setDragging(false)} onDrop={e=>{e.preventDefault();setDragging(false);upload(e.dataTransfer.files[0])}} className={`mt-3 rounded-xl border-2 border-dashed p-3 transition ${dragging?'border-teal-500 bg-teal-50':'border-slate-200'} ${!consent?'opacity-60':''}`}>
+      <div className="flex flex-wrap gap-2">
+        <label className={`inline-flex min-h-10 cursor-pointer items-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold focus-within:ring-4 focus-within:ring-teal-200 ${!consent||busy?'pointer-events-none opacity-50':''}`}>Choose photo<input type="file" accept={ACCEPT} className="sr-only" disabled={!consent||busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value=''}} aria-describedby="photo-formats" aria-label="Choose a photo from your files or photo library"/></label>
+        <label className={`inline-flex min-h-10 cursor-pointer items-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold focus-within:ring-4 focus-within:ring-teal-200 sm:hidden ${!consent||busy?'pointer-events-none opacity-50':''}`}>Take a photo<input type="file" accept="image/*" capture="environment" className="sr-only" disabled={!consent||busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value=''}} aria-label="Take a photo with your camera"/></label>
+        <Button variant="ghost" className="min-h-10 text-xs" disabled={!consent||busy} onClick={()=>demo('red_area')}>Use synthetic demo image</Button>
+      </div>
+      <p id="photo-formats" className="mt-2 text-xs text-slate-600">Upload a photo (JPG, PNG, WebP, or iPhone HEIC/HEIF) · up to 12 MB{dragging?'':' · or drag it here'}</p>
+    </div>
     {busy&&<p className="mt-2 text-xs text-slate-500" role="status">Checking image quality and describing visible features…</p>}
     {error&&<p role="alert" className="mt-2 text-xs text-rose-600">{error} You can continue without a photo.</p>}
-    {photos.data?.map(p=><div key={p.id} className="mt-4 rounded-xl bg-slate-50 p-3"><div className="flex gap-3"><img src={p.image_url} alt={`Your uploaded photo${p.synthetic_demo?' (synthetic demo image)':''}`} className="size-20 rounded-lg object-cover"/><div className="min-w-0 flex-1"><p className="text-xs font-semibold">Possible visual observations <span className="font-normal text-slate-500">· {p.observer==='claude'?'Claude vision':'basic colour analysis (not a medical model)'}</span></p>{p.observations.length===0?<p className="mt-1 text-xs text-slate-600">Nothing clear enough to describe.</p>:<ul className="mt-1 space-y-1 text-xs">{p.observations.map((o,i)=><li key={i}><b>{CATEGORY_LABEL[o.category] ?? o.category}:</b> {o.description} <span className="text-slate-500">{o.uncertainty}</span></li>)}</ul>}</div></div>
-      {p.quality.notes.length>0&&<p className="mt-2 text-[11px] text-amber-700">Image quality: {p.quality.notes.join(' ')}</p>}<ul className="mt-2 list-disc pl-4 text-[11px] text-slate-500">{p.limitations.map(l=><li key={l}>{l}</li>)}</ul><p className="mt-2 text-[11px] text-slate-600">This does not establish a diagnosis or severity. If you’re concerned, contact a healthcare professional; for severe symptoms call 911.</p><Button variant="danger" className="mt-2 min-h-9 py-1 text-xs" onClick={()=>remove(p.id)}>Delete photo</Button></div>)}
+    {photos.data?.map(p=><div key={p.id} className="mt-4 rounded-xl bg-slate-50 p-3"><div className="flex gap-3"><img src={p.image_url} alt={`Your uploaded photo${p.synthetic_demo?' (synthetic demo image)':''}`} className="size-20 rounded-lg object-cover"/><div className="min-w-0 flex-1"><p className="text-xs font-semibold">Possible visual observations <Badge tone="amber">AI-generated</Badge></p><p className="text-[11px] text-slate-500">{p.observer==='claude'?'Described by Claude vision — not a diagnosis.':'Visual analysis unavailable — limited demo fallback (basic colour check, not a medical model).'}</p>{p.observations.length===0?<p className="mt-1 text-xs text-slate-600">Nothing clear enough to describe.</p>:<ul className="mt-1 space-y-1 text-xs">{p.observations.map((o,i)=><li key={i}><b>{CATEGORY_LABEL[o.category] ?? o.category}:</b> {o.description} <span className="text-slate-500">{o.uncertainty}</span></li>)}</ul>}</div></div>
+      {p.quality.notes.length>0&&<p className="mt-2 text-[11px] text-amber-700">Image quality: {p.quality.notes.join(' ')}</p>}<ul className="mt-2 list-disc pl-4 text-[11px] text-slate-500">{p.limitations.map(l=><li key={l}>{l}</li>)}</ul><p className="mt-2 text-[11px] text-slate-600">This does not establish a diagnosis or severity. If you’re concerned, contact a healthcare professional; for severe symptoms call 911.</p><div className="mt-2 flex flex-wrap gap-2"><Button variant="danger" className="min-h-9 py-1 text-xs" onClick={()=>remove(p.id)}>Remove photo</Button><label className={`inline-flex min-h-9 cursor-pointer items-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold ${!consent||busy?'pointer-events-none opacity-50':''}`}>Replace<input type="file" accept={ACCEPT} className="sr-only" disabled={!consent||busy} onChange={async e=>{const f=e.target.files?.[0];e.target.value='';if(f){await remove(p.id);await upload(f)}}} aria-label="Replace this photo"/></label></div></div>)}
   </fieldset>
 }
 
@@ -73,7 +84,10 @@ export function KnowsCard({ snap, onEdit, onShare }: { snap: IntakeSnapshot; onE
 }
 
 /** Contextual data-collection drawer (US-11): right panel on desktop, bottom sheet on mobile. */
-export function IntakeDrawer({ snap, open, onClose }: { snap: IntakeSnapshot; open: boolean; onClose: () => void }) {
+export function IntakeDrawer({ snap, open, onClose, focus }: { snap: IntakeSnapshot; open: boolean; onClose: () => void; focus?: string[] | null }) {
+  const [showAll, setShowAll] = useState(false)
+  useEffect(() => { if (open) setShowAll(false) }, [open, focus])
+  const show = (k: string) => showAll || !focus?.length || focus.includes(k)
   const qc = useQueryClient()
   const val = (k: string, sub = 'text') => String(snap.fields.find(f => f.key === k)?.value?.[sub] ?? '')
   const [temp, setTemp] = useState(''); const [unit, setUnit] = useState('F'); const [measured, setMeasured] = useState('')
@@ -102,12 +116,13 @@ export function IntakeDrawer({ snap, open, onClose }: { snap: IntakeSnapshot; op
   if (!open) return null
   return <div className="fixed inset-0 z-50 flex items-end justify-end bg-slate-950/30 md:items-stretch" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div className="max-h-[90vh] w-full overflow-y-auto rounded-t-3xl bg-white p-6 shadow-2xl md:max-h-none md:w-[420px] md:rounded-none md:rounded-l-3xl"><div className="flex items-start justify-between"><div><h2 id="drawer-title" className="text-xl font-semibold">Add details</h2><p className="mt-1 text-sm text-slate-500">Everything here is optional. Leave out anything you’d rather not share.</p></div><button onClick={onClose} aria-label="Close" className="text-2xl text-slate-400">×</button></div>
     <div className="mt-6 space-y-5">
-      <fieldset><legend className="text-sm font-semibold">Temperature you measured</legend><div className="mt-2 grid grid-cols-[1fr_90px] gap-2"><input inputMode="decimal" value={temp} onChange={e=>setTemp(e.target.value)} className="input" placeholder="e.g. 100.4" aria-label="Temperature value"/><select value={unit} onChange={e=>setUnit(e.target.value)} className="input" aria-label="Unit"><option value="F">°F</option><option value="C">°C</option></select></div><input value={measured} onChange={e=>setMeasured(e.target.value)} className="input mt-2" placeholder="When measured (e.g. this morning)" aria-label="When measured"/><p className="mt-1 text-xs text-slate-500">CuraLink records the number you enter; it doesn’t interpret it. <button type="button" onClick={()=>skip('temperature')} className="font-semibold underline">I haven’t measured it</button></p></fieldset>
-      <label className="block text-sm font-semibold">When it started<input type="date" value={onsetDate} max="2026-10-26" onChange={e=>setOnsetDate(e.target.value)} className="input mt-2"/><span className="mt-1 block text-xs font-normal text-slate-500">{val('onset_text')?`You said: “${val('onset_text')}”. `:''}<button type="button" onClick={()=>skip('onset_text')} className="font-semibold underline">Skip</button></span></label>
-      <label className="block text-sm font-semibold">What you’re experiencing, in your words<textarea value={symptoms} onChange={e=>setSymptoms(e.target.value)} className="input mt-2 min-h-24" placeholder="Describe it however you like"/></label>
+      {focus?.length&&!showAll?<p className="rounded-lg bg-teal-50 p-2 text-xs text-teal-900">Showing what CuraLink just asked about. <button type="button" className="font-semibold underline" onClick={()=>setShowAll(true)}>Show all fields</button></p>:null}
+      {show('temperature')&&<fieldset><legend className="text-sm font-semibold">Temperature you measured</legend><div className="mt-2 grid grid-cols-[1fr_90px] gap-2"><input inputMode="decimal" value={temp} onChange={e=>setTemp(e.target.value)} className="input" placeholder="e.g. 100.4" aria-label="Temperature value"/><select value={unit} onChange={e=>setUnit(e.target.value)} className="input" aria-label="Unit"><option value="F">°F</option><option value="C">°C</option></select></div><input value={measured} onChange={e=>setMeasured(e.target.value)} className="input mt-2" placeholder="When measured (e.g. this morning)" aria-label="When measured"/><p className="mt-1 text-xs text-slate-500">CuraLink records the number you enter; it doesn’t interpret it. <button type="button" onClick={()=>skip('temperature')} className="font-semibold underline">I haven’t measured it</button></p></fieldset>}
+      {show('onset')&&<label className="block text-sm font-semibold">When it started<input type="date" value={onsetDate} max="2026-10-26" onChange={e=>setOnsetDate(e.target.value)} className="input mt-2"/><span className="mt-1 block text-xs font-normal text-slate-500">{val('onset_text')?`You said: “${val('onset_text')}”. `:''}<button type="button" onClick={()=>skip('onset_text')} className="font-semibold underline">Skip</button></span></label>}
+      {show('other')&&<><label className="block text-sm font-semibold">What you’re experiencing, in your words<textarea value={symptoms} onChange={e=>setSymptoms(e.target.value)} className="input mt-2 min-h-24" placeholder="Describe it however you like"/></label>
       <label className="block text-sm font-semibold">Appointment preference<input value={pref} onChange={e=>setPref(e.target.value)} className="input mt-2" placeholder="e.g. afternoons, telehealth"/></label>
-      <label className="block text-sm font-semibold">Accessibility needs<input value={access} onChange={e=>setAccess(e.target.value)} className="input mt-2" placeholder="Optional"/></label>
-      <PhotoSection/>
+      <label className="block text-sm font-semibold">Accessibility needs<input value={access} onChange={e=>setAccess(e.target.value)} className="input mt-2" placeholder="Optional"/></label></>}
+      {show('photo')&&<PhotoSection/>}
       {error&&<p role="alert" className="text-sm text-rose-600">{error}</p>}
       <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={save.isPending} onClick={()=>save.mutate()}>Save details</Button></div>
     </div></div></div>

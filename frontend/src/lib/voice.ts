@@ -21,6 +21,7 @@ export interface VoiceEvents {
   onLevel: (level: number) => void
   onNotice: (message: string) => void
   onMetric?: (m: { ttfa_ms?: number; interrupt_ms?: number }) => void
+  onCancelled?: () => void // the reply being spoken was cut off by the student
 }
 
 type SpeechRecognitionLike = {
@@ -52,6 +53,8 @@ class PcmCapture extends AudioWorkletProcessor {
   }
 }
 registerProcessor('pcm-capture', PcmCapture)`
+
+export const newTurnId = () => (crypto.randomUUID ? crypto.randomUUID() : `t-${Date.now()}-${Math.random().toString(36).slice(2)}`)
 
 const SPEECH_LEVEL = 0.035 // RMS threshold for "user is talking"
 const SPEECH_START_MS = 180
@@ -130,6 +133,7 @@ export class VoiceController {
       this.ws?.send(JSON.stringify({ type: 'barge_in' }))
     } else {
       this.turn += 1 // any reply still in flight is now stale
+      if (this.state === 'SPEAKING') this.ev.onCancelled?.()
       speechSynthesis.cancel()
       this.set('INTERRUPTED'); this.set('LISTENING')
     }
@@ -224,7 +228,7 @@ export class VoiceController {
       case 'transcript.partial': this.ev.onPartial(m.text ?? ''); break
       case 'transcript.final': this.acceptedVersion = m.turn_version; this.ev.onUserFinal(m.text ?? ''); break
       case 'assistant.text': if (m.reply && m.turn_version >= this.acceptedVersion) this.ev.onReply(m.reply); break
-      case 'assistant.cancelled': this.acceptedVersion = m.turn_version; this.stopPlayback(); break
+      case 'assistant.cancelled': this.acceptedVersion = m.turn_version; this.stopPlayback(); this.ev.onCancelled?.(); break
       case 'assistant.audio.chunk': if (m.turn_version >= this.acceptedVersion && m.data) this.play(m.data); break
       case 'audio.error': this.ev.onNotice(m.message ?? 'Voice error.'); break
     }
@@ -292,7 +296,7 @@ export class VoiceController {
     this.set('THINKING')
     let reply: IntakeReply
     try {
-      reply = await api.post<IntakeReply>('/intake/messages', { message: text, channel: spoken ? 'voice' : 'text', history: this.history })
+      reply = await api.post<IntakeReply>('/intake/messages', { message: text, channel: spoken ? 'voice' : 'text', history: this.history, client_turn_id: newTurnId() })
     } catch (e) {
       this.ev.onNotice(e instanceof Error ? e.message : 'Message failed.')
       if (mine === this.turn) this.set('LISTENING')

@@ -88,6 +88,8 @@ case "${1:-start}" in
     # Browser tests reset data on every test, so they get their own API, web server and database.
     shift
     E2E_DB="$ROOT/backend/e2e_isolated.db"
+    API_PORT=8011 "$0" stop >/dev/null   # always test the current code, never a stale test server
+    sleep 1
     DATABASE_URL="sqlite:///$E2E_DB" API_PORT=8011 WEB_PORT=8454 "$0" start
     (cd "$ROOT/frontend" && E2E_BASE_URL=http://localhost:8454 npx playwright test "$@")
     ;;
