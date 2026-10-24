@@ -1,3 +1,4 @@
+from tests.conftest import RIVERA_MON_1030
 """Semester filtering + calendar placement for a multi-term UniTime export (Spring 2026 + Fall 2026).
 
 Regression for: imported schedule showed previous-semester classes and nothing in the current week,
@@ -82,7 +83,7 @@ def test_selecting_a_term_updates_every_dependent_view(multi, clinician):
     assert {e["course_code"] for e in spring_week} == {"MA 16500", "ENGL 10600"}
     assert _week(multi, "2026-10-26", "2026-11-02")["events"] == []  # Fall hidden while Spring is selected
     # Absence matching follows the selected term.
-    multi.post("/api/v1/appointments/confirm", json={"slot_id": "slot_04", "student_approved": True, "idempotency_key": "term-key-0001"})
+    multi.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "term-key-0001"})
     imp = multi.post("/api/v1/absence-cases/preview", json={"start_date": "2026-10-27", "end_date": "2026-10-29"}).json()
     assert imp["courses"] == []
     multi.put("/api/v1/calendar/selected-term", json={"term": "Fall 2026"})
@@ -91,12 +92,16 @@ def test_selecting_a_term_updates_every_dependent_view(multi, clinician):
 
 
 def test_scheduling_conflicts_use_the_selected_term(multi):
-    # Wed Oct 28 14:45-15:15 slot overlaps Fall's COM 11400 (Wed 15:00) only when Fall is selected.
-    recs = multi.post("/api/v1/schedule/recommendations", json={"appointment_type": "general_consultation"}).json()
-    assert {r["slot"]["id"]: r["reason_code"] for r in recs["rejected"]}.get("slot_12") == "CLASS_CONFLICT"
+    # Dr. Rivera Wed Oct 28 15:00 overlaps Fall's COM 11400 (Wed 15:00) only when Fall is selected.
+    from tests.conftest import slot
+
+    sid = slot("demo-clinician-1", "2026-10-28T15:00")
+    body = {"clinician_id": "demo-clinician-1", "appointment_type": "general_consultation", "start": "2026-10-28", "days": 1, "per_clinician": 40}
+    fall = multi.post("/api/v1/schedule/search", json=body).json()
+    assert sid not in [s["id"] for s in fall["clinicians"][0]["slots"]] and fall["excluded"].get("CLASS_CONFLICT")
     multi.put("/api/v1/calendar/selected-term", json={"term": "Spring 2026"})
-    recs = multi.post("/api/v1/schedule/recommendations", json={"appointment_type": "general_consultation"}).json()
-    assert "slot_12" in [o["slot"]["id"] for o in recs["options"]]
+    spring = multi.post("/api/v1/schedule/search", json=body).json()
+    assert sid in [s["id"] for s in spring["clinicians"][0]["slots"]]
 
 
 def test_open_ended_repeat_is_limited_to_one_term():

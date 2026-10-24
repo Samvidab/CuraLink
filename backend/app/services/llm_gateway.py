@@ -31,6 +31,7 @@ Hard rules:
 - Never invent values. Only call propose_intake_fields with information the student literally stated in this conversation. If a temperature has no unit, ask for the unit instead of guessing.
 - You cannot book appointments, send messages, sign or approve documents, or decide absence dates. Point the student to the on-screen controls for those steps.
 - All clinic availability is synthetic demo data; say so if you mention times.
+- Only mention clinicians and times returned by list_clinicians/get_ranked_slots. If a requested clinician has no openings, say so and offer that clinician's next dates before suggesting others. Never infer a clinician's gender or other traits from their name.
 - Sound like a calm, kind person: brief, natural, varied phrasing; usually one or two sentences (never more than three), no lists or markdown. Ask at most one question at a time.
 - Use the conversation so far; don't re-ask for details the student already gave.
 - When the student wants an appointment, call get_ranked_slots, mention one or two options briefly, and call request_ui_action with FIND_CARE so they can confirm on screen. When a detail like temperature, onset date or a photo would be easier to enter in a form, call request_ui_action with OPEN_INTAKE_FORM.
@@ -65,16 +66,26 @@ TOOLS: list[dict] = [
     },
     {
         "name": "get_ranked_slots",
-        "description": "Read the top demo clinic appointment options that fit the student's imported class schedule, ranked by wait, travel and fit. Read-only; does not book.",
+        "description": "Look up REAL demo appointment openings (clinician + time) that fit the student's selected-semester classes. Use it whenever the student asks about appointments, a specific clinician, a day, or the earliest time. Read-only; the student confirms on screen.",
         "strict": True,
         "input_schema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["appointment_type"],
+            "required": ["appointment_type", "clinician", "day", "part_of_day", "sort"],
             "properties": {
                 "appointment_type": {"type": "string", "enum": ["routine_checkup", "vaccination", "mental_health", "general_consultation", "any"]},
+                "clinician": {"type": "string", "description": "A clinician's name exactly as the student said it, or 'any'."},
+                "day": {"type": "string", "description": "YYYY-MM-DD for a specific day, or 'any' for the next school week."},
+                "part_of_day": {"type": "string", "enum": ["any", "morning", "afternoon", "evening"]},
+                "sort": {"type": "string", "enum": ["best", "earliest"]},
             },
         },
+    },
+    {
+        "name": "list_clinicians",
+        "description": "List the clinicians in this demo with specialty and appointment types. Never invent clinicians.",
+        "strict": True,
+        "input_schema": {"type": "object", "additionalProperties": False, "required": [], "properties": {}},
     },
     {
         "name": "list_calendar_events",
@@ -102,9 +113,10 @@ TOOLS.append({
 ALLOWED_TOOLS = {t["name"] for t in TOOLS}
 TOOL_LABELS = {
     "propose_intake_fields": "Updating what CuraLink knows",
-    "get_ranked_slots": "Comparing eligible slots",
+    "get_ranked_slots": "Checking clinician schedules",
     "list_calendar_events": "Reading class calendar",
     "request_ui_action": "Opening on your screen",
+    "list_clinicians": "Checking clinicians",
 }
 
 ToolHandler = Callable[[str, dict], Awaitable[str]]

@@ -1,3 +1,4 @@
+from tests.conftest import RIVERA_MON_1030
 from datetime import UTC, date, datetime
 
 import pytest
@@ -27,7 +28,7 @@ def test_mapper_counts_only_real_meetings_across_a_weekend():
 @pytest.fixture()
 def case(student):
     student.post("/api/v1/calendars/import-sample")
-    student.post("/api/v1/appointments/confirm", json={"slot_id": "slot_04", "student_approved": True, "idempotency_key": "abs-key-0001"})
+    student.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "abs-key-0001"})
     # Symptom details in intake must never leak into professor messages (AT-11).
     sid = student.get("/api/v1/intake/sessions/current").json()["session_id"]
     student.patch(f"/api/v1/intake/sessions/{sid}/fields", json={"fields": [{"key": "symptoms_free_text", "value": {"text": "strep-like sore throat and vomiting"}}]})

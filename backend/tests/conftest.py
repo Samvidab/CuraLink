@@ -64,3 +64,15 @@ def login(app):
         return c, r
 
     return _login
+
+
+def slot(clinician_id: str = "demo-clinician-1", local: str = "2026-10-26T10:30", appointment_type: str = "general_consultation") -> str:
+    """Build an availability slot id (clinician|UTC start|type) from a local Indianapolis time."""
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    start = datetime.fromisoformat(local).replace(tzinfo=ZoneInfo("America/Indiana/Indianapolis")).astimezone(UTC)
+    return f"{clinician_id}|{start.strftime('%Y-%m-%dT%H:%MZ')}|{appointment_type}"
+
+
+RIVERA_MON_1030 = slot()

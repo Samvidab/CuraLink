@@ -35,6 +35,7 @@ class Reply:
     form: dict | None = None  # contextual form to open, e.g. {"fields": ["temperature"]}
     turn_id: str | None = None
     fallback_reason: dict | None = None
+    schedule: dict | None = None  # REAL clinician + time options from the scheduling backend
 
 
 def current_session(db: Session, student: User, create: bool = True) -> IntakeSession | None:
@@ -98,6 +99,35 @@ def _apply_proposed(db: Session, sess: IntakeSession, proposed: list[dict], chan
     return updated
 
 
+def _schedule_context(db: Session, student: User):
+    from app.models import Appointment
+    from app.services import availability
+
+    names = [(p.clinician_id, availability.profile_out(db, p)["name"]) for p in availability.active_profiles(db)]
+    last = db.scalar(select(Appointment.clinician_id).where(Appointment.student_id == student.id, Appointment.clinician_id.is_not(None)).order_by(Appointment.created_at.desc()))
+    return names, last
+
+
+def _appointment_type_for(conv: dict, sched: dict) -> str:
+    if sched.get("appointment_type"):
+        return sched["appointment_type"]
+    concerns = set(conv.get("concerns", []))
+    return "general_consultation" if "symptom" in concerns else "routine_checkup"
+
+
+def _run_search(db: Session, student: User, conv: dict, sched: dict) -> dict:
+    from datetime import date as _date
+
+    from app.routers.scheduling import SearchIn, search
+
+    req = SearchIn(appointment_type=_appointment_type_for(conv, sched), clinician_id=sched.get("clinician_id"), attribute=sched.get("attribute"),
+                   start=_date.fromisoformat(sched["start"]) if sched.get("start") else None, days=sched.get("days", 5),
+                   part_of_day=sched.get("part_of_day", "any"), sort=sched.get("sort", "best"), per_clinician=4)
+    result = search(db, student, req)
+    result["options"] = result["options"][:6]
+    return result
+
+
 def _field_displays(db: Session, sess: IntakeSession) -> dict[str, str]:
     return {k: display(k, f.value) for k, f in fields_of(db, sess).items()}
 
@@ -140,6 +170,9 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
     if llm_gateway.available():
         context = (f"demo date {get_settings().demo_today.isoformat()}; calendar imported: {has_calendar}; channel: {channel}; "
                    + dialog.context_for_model(conv, _field_displays(db, sess)))
+        names, last = _schedule_context(db, student)
+        sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)
+        tool_handler.sched_type = _appointment_type_for(conv, sched or {})
         try:
             turn = await llm_gateway.run_turn(history, text, context, tool_handler)
             updated = _apply_proposed(db, sess, turn.proposed_fields, channel)
@@ -151,7 +184,11 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
             conv["state"] = plan.state
             reply_text = dialog.avoid_repeat(conv, reply_text or plan.text, plan.text)
             actions = list(dict.fromkeys(turn.ui_actions + plan.actions))
-            reply = Reply(sess.id, reply_text, "GENERAL_SUPPORT", None, actions, turn.tool_events, updated, missing(db, sess), "claude", plan.state, plan.form, turn_id)
+            schedule = getattr(tool_handler, "last_schedule", None) or (_run_search(db, student, conv, sched) if sched is not None else None)
+            if schedule:
+                conv["state"] = "COORDINATING_APPOINTMENT"
+                actions = list(dict.fromkeys(["FIND_CARE", *actions]))
+            reply = Reply(sess.id, reply_text, "GENERAL_SUPPORT", None, actions, turn.tool_events, updated, missing(db, sess), "claude", conv["state"], plan.form, turn_id, None, schedule)
             return _remember(db, sess, conv, client_turn_id, reply)
         except llm_gateway.LlmUnavailable as exc:
             audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_FALLBACK", detail=str(exc)[:40])
@@ -167,11 +204,20 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
         extracted = [e for e in extracted if e.key != "symptoms_free_text"] + [Extracted("onset_text", {"text": text})]
     updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
     db.flush()
+    names, last = _schedule_context(db, student)
+    sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)  # uses the PREVIOUS state
     plan = dialog.plan(conv, text, updated, _field_displays(db, sess), _has_photo(db, sess), has_calendar, notes)
     conv["state"] = plan.state
     text_out = _resources(text) if not updated and not plan.pending and plan.state == "COLLECTING_INITIAL_CONCERN" and _resources(text) else plan.text
+    schedule, actions, form = None, plan.actions, plan.form
+    if sched is not None:  # real lookup; the reply text summarises what the backend returned
+        schedule = _run_search(db, student, conv, sched)
+        ack = dialog._ack(updated, _field_displays(db, sess))
+        text_out = " ".join(x for x in (ack, dialog.describe_schedule(schedule, sched)) if x)
+        conv["state"], conv["pending"], form = "COORDINATING_APPOINTMENT", None, None
+        actions = ["FIND_CARE"] + ([] if has_calendar else ["IMPORT_CALENDAR"])
     text_out = dialog.avoid_repeat(conv, text_out, "Would you like to review your information, find an appointment, or add something else?")
-    reply = Reply(sess.id, text_out, "GENERAL_SUPPORT", None, plan.actions, [], updated, missing(db, sess), "scripted", plan.state, plan.form, turn_id, fallback_reason)
+    reply = Reply(sess.id, text_out, "GENERAL_SUPPORT", None, actions, [], updated, missing(db, sess), "scripted", conv["state"], form, turn_id, fallback_reason, schedule)
     return _remember(db, sess, conv, client_turn_id, reply)
 
 

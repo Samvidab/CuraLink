@@ -1,3 +1,4 @@
+from tests.conftest import RIVERA_MON_1030
 import io
 
 import pytest
@@ -70,7 +71,7 @@ def test_upload_requires_consent_and_feeds_intake(student):
 
 def test_photo_reaches_only_the_assigned_clinician_when_selected(student, clinician, login):
     student.post("/api/v1/calendars/import-sample")
-    student.post("/api/v1/appointments/confirm", json={"slot_id": "slot_04", "student_approved": True, "idempotency_key": "vision-key-01"})
+    student.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "vision-key-01"})
     enc = student.get("/api/v1/students/me/encounters").json()[0]
     att = student.post("/api/v1/vision/demo-images/discoloration?consent=true").json()
     assert att["synthetic_demo"] and att["observations"][0]["category"] == "discoloration_possible_bruise"
@@ -89,7 +90,7 @@ def test_photo_reaches_only_the_assigned_clinician_when_selected(student, clinic
 
 def test_photo_sharing_and_clinician_review(student, clinician, login):
     student.post("/api/v1/calendars/import-sample")
-    student.post("/api/v1/appointments/confirm", json={"slot_id": "slot_04", "student_approved": True, "idempotency_key": "vision-key-02"})
+    student.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "vision-key-02"})
     enc = student.get("/api/v1/students/me/encounters").json()[0]
     att = student.post("/api/v1/vision/demo-images/red_area?consent=true").json()
     sid = student.get("/api/v1/intake/sessions/current").json()["session_id"]

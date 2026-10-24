@@ -1,3 +1,4 @@
+from tests.conftest import RIVERA_MON_1030
 """Clinician-controlled absence workflow + manual-configuration guarantees.
 
 Requirement map (other files cover the rest):
@@ -34,7 +35,7 @@ PW = "curalink-demo"
 
 def _booked(student):
     student.post("/api/v1/calendars/import-sample")
-    student.post("/api/v1/appointments/confirm", json={"slot_id": "slot_04", "student_approved": True, "idempotency_key": "clin-flow-0001"})
+    student.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "clin-flow-0001"})
     return student.get("/api/v1/students/me/encounters").json()[0]
 
 

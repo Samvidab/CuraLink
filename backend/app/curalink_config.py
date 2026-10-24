@@ -64,6 +64,19 @@ CERTIFICATE_BRANDING = {"header_hex": "#0F766E", "logo_path": None}
 # Where the clinician's signature image is drawn on the certificate (points from the bottom-left; 72 pt = 1 inch).
 SIGNATURE_PLACEMENT = {"x": 54, "y_offset": 6, "max_width": 200, "max_height": 48}
 
+# CURALINK_CONFIG: APPOINTMENT_DURATION
+# Minutes per appointment type. Candidate start times are generated on a SLOT_STEP_MINUTES grid inside each
+# clinician's working windows; a slot is offered only if the whole duration fits.
+APPOINTMENT_DURATION = {"routine_checkup": 30, "general_consultation": 30, "vaccination": 15, "mental_health": 45}
+DEFAULT_APPOINTMENT_DURATION = 30
+APPOINTMENT_TYPES = [
+    {"id": "routine_checkup", "label": "Routine checkup"},
+    {"id": "vaccination", "label": "Vaccinations"},
+    {"id": "mental_health", "label": "Mental health"},
+    {"id": "general_consultation", "label": "General consultation"},
+]
+SLOT_STEP_MINUTES = 15
+
 # CURALINK_CONFIG: NOTIFICATION_TEMPLATES
 # Professor notice. Placeholders: {instructor} {student} {course} {dates} {start} {end} {clinician} {clinic}.
 # Minimum necessary information only: no diagnosis, symptoms, intake details or photos.

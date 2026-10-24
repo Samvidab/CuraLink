@@ -1,3 +1,4 @@
+from tests.conftest import RIVERA_MON_1030
 import pytest
 
 from app.services import llm_gateway, safety
@@ -130,7 +131,7 @@ def test_model_proposals_are_validated_and_never_guessed(student, monkeypatch):
     assert r["mode"] == "claude"
     assert r["assistant_message"] == safety.SAFE_REPLACEMENT  # diagnosis replaced
     assert r["field_updates"] == ["symptoms_free_text"]  # unit-less temperature and unknown key dropped
-    assert '"source_mode": "demo"' in calls["slots"] and "Demo Student Health Clinic" in calls["slots"]
+    assert '"source_mode": "demo"' in calls["slots"] and "Dr. Avery Rivera" in calls["slots"]  # real clinicians from the backend
     assert "LLM_OUTPUT_GUARDED" in [a["event_type"] for a in student.get("/api/v1/students/me/activity").json()]
 
 
@@ -154,7 +155,7 @@ def test_safety_runs_before_the_model(student, monkeypatch):
 
 
 def test_unknown_tools_are_not_offered_to_the_model():
-    assert llm_gateway.ALLOWED_TOOLS == {"propose_intake_fields", "get_ranked_slots", "list_calendar_events", "request_ui_action"}
+    assert llm_gateway.ALLOWED_TOOLS == {"propose_intake_fields", "get_ranked_slots", "list_clinicians", "list_calendar_events", "request_ui_action"}
     assert not {"book_appointment", "send_email", "sign_document", "approve_provider", "grant_excuse"} & llm_gateway.ALLOWED_TOOLS
 
 
@@ -162,7 +163,7 @@ def test_unknown_tools_are_not_offered_to_the_model():
 
 def _book(student):
     student.post("/api/v1/calendars/import-sample")
-    student.post("/api/v1/appointments/confirm", json={"slot_id": "slot_04", "student_approved": True, "idempotency_key": "handoff-key-1"})
+    student.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "handoff-key-1"})
     return student.get("/api/v1/students/me/encounters").json()[0]
 
 

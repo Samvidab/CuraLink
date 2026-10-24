@@ -132,6 +132,8 @@ class ActivityOut(BaseModel):
 class AppointmentSummary(BaseModel):
     id: str
     state: str
+    clinician_id: str | None = None
+    clinician_name: str | None = None
     appointment_type: str
     clinic_name: str
     location: str
@@ -178,91 +180,12 @@ class EncounterDetail(EncounterRow):
     appointment_id: str | None
 
 
-
-class AppointmentType(BaseModel):
-    id: str
-    label: str
-
-
-class SlotOut(BaseModel):
-    id: str
-    clinic_id: str
-    clinic_name: str
-    location: str
-    appointment_type: str
-    starts_at: datetime
-    ends_at: datetime
-    travel_minutes: int
-    status: str
-    permitted: bool
-    source_mode: SourceMode | str
-
-
-class SlotsOut(BaseModel):
-    slots: list[SlotOut]
-    inventory_updated_at: str
-    source_mode: SourceMode | str
-    appointment_types: list[AppointmentType]
-
-
 class SchedulePreferences(BaseModel):
     avoid_class_conflicts: bool = True
     allow_conflicts: bool = False
     max_travel_minutes: int | None = Field(None, ge=0, le=240)
     earliest_hour: int | None = Field(None, ge=0, le=23)
     latest_hour: int | None = Field(None, ge=1, le=24)
-
-
-class RecommendationIn(BaseModel):
-    appointment_type: str | None = None
-    start: str | None = None  # YYYY-MM-DD (local); defaults to demo today
-    days: int = Field(5, ge=1, le=21)
-    preferences: SchedulePreferences = SchedulePreferences()
-
-
-class ConflictOut(BaseModel):
-    label: str
-    event_id: str | None
-    kind: Literal["CLASS_OVERLAP", "TRAVEL_BUFFER", "PERSONAL_BLOCK"]
-    overlap_minutes: int
-
-
-class OptionOut(BaseModel):
-    rank: int
-    slot: SlotOut
-    score: float
-    reason_codes: list[str]
-    conflicts: list[ConflictOut]
-    source_mode: SourceMode | str
-
-
-class RejectedOut(BaseModel):
-    slot: SlotOut
-    reason_code: str
-    conflicts: list[ConflictOut]
-
-
-class RecommendationsOut(BaseModel):
-    options: list[OptionOut]
-    rejected: list[RejectedOut]
-    calendar_considered: bool
-    generated_at: datetime
-    source_mode: SourceMode | str
-    scoring: dict[str, float]
-
-
-class ConfirmIn(BaseModel):
-    slot_id: str
-    student_approved: bool
-    idempotency_key: str = Field(min_length=8, max_length=80)
-
-
-class ConfirmOut(BaseModel):
-    appointment_id: str
-    status: str
-    external_booking: bool = False
-    appointment: AppointmentSummary
-    message: str
 
 
 class BlockIn(BaseModel):
@@ -328,6 +251,7 @@ class IntakeReplyOut(BaseModel):
     form: dict | None = None
     turn_id: str | None = None
     fallback_reason: dict | None = None  # why Claude wasn't used for this reply (if a key is configured)
+    schedule: dict | None = None  # real clinician + time options (selectable in the chat)
 
 
 class FieldWrite(BaseModel):

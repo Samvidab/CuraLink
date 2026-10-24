@@ -188,3 +188,111 @@ def context_for_model(conv: dict, fields: dict[str, str]) -> str:
     return (f"conversation state {conv.get('state')}; already known: {known}; student declined: {', '.join(conv.get('declined', [])) or 'nothing'}; "
             f"already asked: {', '.join(conv.get('asked', {})) or 'nothing'}. Do NOT ask about anything declined, known or already asked. "
             "Only ask about temperature if they mention fever; only offer a photo for something visible. If they want an appointment, go straight to it.")
+
+
+# ---- scheduling intents (clinician + time) ----------------------------------------------------------------
+WHO_AVAILABLE = re.compile(r"\b(which|what|who|any)\b.{0,20}\b(doctors?|clinicians?|providers?|nurses?)\b|\bwho('?s| is) (available|free)\b|\bavailable (doctors?|clinicians?)\b", re.I)
+EARLIEST = re.compile(r"\b(earliest|soonest|first available|as soon as possible|asap)\b", re.I)
+NO_PREF = re.compile(r"\b(no preference|don'?t (have a )?preference|anyone is fine|any (doctor|clinician) is fine|doesn'?t matter)\b", re.I)
+SAME_AS_LAST = re.compile(r"\b(same (doctor|clinician|provider)|(saw|seen|see) last time|my (usual|regular) doctor)\b", re.I)
+GENDER = re.compile(r"\b(female|woman|women|lady)\b|\b(male|man|men)\b(?= (doctor|clinician|provider))", re.I)
+PART = re.compile(r"\b(morning|afternoon|evening)\b", re.I)
+WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+TYPE_WORDS = [("vaccination", re.compile(r"\b(vaccin\w*|shot|flu shot|booster)\b", re.I)), ("mental_health", re.compile(r"\b(counsel\w*|therap\w*|mental health|anxiety|depress\w*)\b", re.I)),
+              ("routine_checkup", re.compile(r"\b(check-?up|physical|routine)\b", re.I))]
+
+
+def match_clinician(text: str, clinicians: list[tuple[str, str]]) -> str | None:
+    """Match 'Dr. Rivera' / 'Avery Rivera' / 'Nair' against REAL clinician names only."""
+    low = text.lower()
+    for cid, name in clinicians:
+        parts = [w for w in re.sub(r"^dr\.?\s+|,.*$", "", name, flags=re.I).lower().split() if len(w) > 2]
+        if parts and (parts[-1] in re.findall(r"[a-z]+", low) or " ".join(parts) in low):
+            return cid
+    return None
+
+
+def scheduling_intent(conv: dict, text: str, clinicians: list[tuple[str, str]], today, last_clinician: str | None) -> dict | None:
+    """Update conv['sched'] from the message. Returns the preferences if this turn is about scheduling."""
+    from datetime import timedelta
+
+    sched = dict(conv.get("sched") or {})
+    touched = False
+    cid = match_clinician(text, clinicians)
+    if cid:
+        sched["clinician_id"], touched = cid, True
+    if SAME_AS_LAST.search(text):
+        sched["clinician_id"], sched["same_as_last"], touched = last_clinician, True, True
+        sched.pop("attribute", None)
+    if NO_PREF.search(text) or WHO_AVAILABLE.search(text):
+        if not cid:
+            sched.pop("clinician_id", None)
+            sched.pop("attribute", None)
+            sched.pop("same_as_last", None)
+        touched = True
+    g = GENDER.search(text)
+    if g and re.search(r"\b(doctor|clinician|provider|nurse|someone)\b", text, re.I):
+        sched["attribute"], touched = {"gender": "woman" if g.group(1) else "man"}, True
+        if not cid:  # a new preference replaces an earlier clinician choice
+            sched.pop("clinician_id", None)
+            sched.pop("same_as_last", None)
+    if EARLIEST.search(text):
+        sched["sort"], touched = "earliest", True
+    # Day / time-of-day words only mean scheduling inside a scheduling context ("since Monday" is an onset).
+    in_context = touched or bool(APPOINTMENT.search(text)) or conv.get("state") == "COORDINATING_APPOINTMENT"
+    if not in_context:
+        return None
+    low = re.sub(r"\b(since|started|starting|began|from)\s+(last\s+)?\w+", " ", text.lower())
+    if "tomorrow" in low:
+        sched["start"], sched["days"], touched = (today + timedelta(days=1)).isoformat(), 1, True
+    elif re.search(r"\btoday\b", low):
+        sched["start"], sched["days"], touched = today.isoformat(), 1, True
+    else:
+        for i, wd in enumerate(WEEKDAY_NAMES):
+            if re.search(rf"\b{wd}\b", low):
+                delta = (i - today.weekday()) % 7
+                sched["start"], sched["days"], touched = (today + timedelta(days=delta)).isoformat(), 1, True
+                break
+        if re.search(r"\b(this|next) week\b|\bany ?day\b", low):
+            sched["start"], sched["days"], touched = today.isoformat(), 5, True
+    p = PART.search(low)
+    if p:
+        sched["part_of_day"], touched = p.group(1).lower(), True
+    for t, rx in TYPE_WORDS:
+        if rx.search(text):
+            sched["appointment_type"] = t
+    if APPOINTMENT.search(text) or touched:
+        conv["sched"] = sched
+        return sched
+    return None
+
+
+def describe_schedule(result: dict, sched: dict) -> str:
+    """Short spoken-friendly summary of REAL search results (times come from the scheduling backend)."""
+    from datetime import datetime
+
+    def when(s: dict) -> str:
+        d = datetime.fromisoformat(s["starts_at"])
+        return f"{d:%a} {d:%-I:%M %p}"
+
+    if sched.get("same_as_last") and not sched.get("clinician_id"):
+        return "I couldn't find a previous appointment for you, so here's who is available instead."
+    with_slots = [c for c in result["clinicians"] if c["slots"]]
+    if result.get("notice"):
+        alt = result["alternatives"]
+        bits = [result["notice"]]
+        if alt["same_clinician"]:
+            bits.append(f"Their next openings are {', '.join(when(s) for s in alt['same_clinician'][:2])}.")
+        if alt["other_clinicians"]:
+            bits.append(f"Other clinicians have time, for example {alt['other_clinicians'][0]['clinician_name']} on {when(alt['other_clinicians'][0])}.")
+        return " ".join(bits) + " Pick one on screen, or tell me another day."
+    if not with_slots:
+        return "No eligible appointments matched your calendar. Try another day, or contact the clinic."
+    if sched.get("clinician_id") and len(with_slots) == 1:
+        c = with_slots[0]
+        return f"Here are {c['name']}'s openings that don't clash with your classes — the first is {when(c['slots'][0])}. Choose one on screen to confirm."
+    if sched.get("sort") == "earliest":
+        s = result["options"][0]
+        return f"The earliest opening that fits your classes is {when(s)} with {s['clinician_name']}. Other options are on screen."
+    names = ", ".join(f"{c['name']} (first {when(c['slots'][0])})" for c in with_slots[:3])
+    return f"Available clinicians: {names}. Tap a time to confirm, or tell me who you'd like to see."

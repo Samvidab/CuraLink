@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     # Fixed "today" so the fictional demo week is reproducible.
     demo_today: date = date(2026, 10, 26)
+    # CURALINK_CONFIG: SCHEDULING_TIMEZONE
+    # Default timezone for students/clinicians and demo dates. Each clinic's own timezone (demo_availability.json)
+    # is used to interpret clinician working hours; all instants are stored in UTC and DST-safe via zoneinfo.
     demo_timezone: str = "America/Indiana/Indianapolis"
 
     session_cookie_name: str = "curalink_session"

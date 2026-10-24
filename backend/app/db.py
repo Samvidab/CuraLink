@@ -59,6 +59,8 @@ def _add_missing_columns() -> None:
             for col in table.columns:
                 if col.name not in existing:
                     conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine().dialect)}'))
+            for index in table.indexes:  # new indexes (e.g. the no-double-booking index) on existing tables
+                index.create(conn, checkfirst=True)
 
 
 def drop_all() -> None:

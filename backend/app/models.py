@@ -6,7 +6,7 @@ normalises aware values on write and returns aware UTC values on read.
 
 from datetime import UTC, date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy.types import DateTime as _DateTime, TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -112,7 +112,12 @@ class CalendarEvent(Base):
 
 
 class ClinicSlot(Base):
+    """A BOOKED clinician interval (created at confirmation). Candidate times are generated from availability rules.
+    The partial unique index blocks two active bookings for one clinician at the same start; overlapping
+    starts are rejected inside the booking transaction (services/availability.book)."""
+
     __tablename__ = "clinic_slots"
+    __table_args__ = (Index("uq_clinician_active_start", "clinician_id", "starts_at", unique=True, sqlite_where=text("status = 'BOOKED'")),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     clinic_id: Mapped[str] = mapped_column(String)
@@ -135,6 +140,8 @@ class Appointment(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     slot_id: Mapped[str] = mapped_column(ForeignKey("clinic_slots.id"))
+    clinician_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)  # the clinician the student chose
+    appointment_type: Mapped[str | None] = mapped_column(String, nullable=True)
     state: Mapped[str] = mapped_column(String)  # DEMO_CONFIRMED | CANCELLED
     confirmation_mode: Mapped[str] = mapped_column(String, default="demo")
     idempotency_key: Mapped[str] = mapped_column(String)
@@ -404,3 +411,52 @@ class ClinicalEvaluation(Base):
     clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     values: Mapped[dict] = mapped_column(JSON, default=dict)  # keys from curalink_config.EXAMINATION_FIELDS
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ClinicianProfile(Base):
+    # CURALINK_CONFIG: CLINICIAN_PROFILE_DATA
+    # Loaded from sample_data/demo_users.json ("profile" on each clinician) by app/seed.py. Specialty, clinic,
+    # supported appointment types and optional SELF-REPORTED attributes (never inferred from names/photos).
+    __tablename__ = "clinician_profiles"
+
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    specialty: Mapped[str] = mapped_column(String)
+    clinic_id: Mapped[str] = mapped_column(String)
+    clinic_name: Mapped[str] = mapped_column(String)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    travel_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    timezone: Mapped[str] = mapped_column(String, default="America/Indiana/Indianapolis")
+    appointment_types: Mapped[list] = mapped_column(JSON, default=list)
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict)  # {"gender": {"value": ..., "source": ...}}
+    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    photo_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    accepting: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AvailabilityRule(Base):
+    """Weekly recurring working hours (local to the clinician's timezone)."""
+
+    __tablename__ = "availability_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    weekday: Mapped[int] = mapped_column(Integer)  # 0 = Monday
+    start_time: Mapped[str] = mapped_column(String)  # "HH:MM"
+    end_time: Mapped[str] = mapped_column(String)
+    effective_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+
+class AvailabilityException(Base):
+    """Date-specific change: 'unavailable' (whole day if no times; vacations via end_date) or 'extra' hours."""
+
+    __tablename__ = "availability_exceptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String)  # unavailable | extra
+    start_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    end_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)

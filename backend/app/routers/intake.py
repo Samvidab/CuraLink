@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.errors import ApiError
 from app.models import Encounter, HandoffPacket, IntakeField, IntakeSession, User
-from app.routers.scheduling import recommendations
+from app.routers.scheduling import SearchIn, search
 from app.schemas import (
     ConfirmFieldIn,
     ConsentIn,
@@ -19,7 +19,6 @@ from app.schemas import (
     IntakeMessageIn,
     IntakeReplyOut,
     IntakeSnapshot,
-    RecommendationIn,
     SkipIn,
     StudentEncounterOut,
 )
@@ -65,14 +64,31 @@ def tool_handler_for(db: Session, user: User):
             return "Recorded as unconfirmed drafts for the student to review."
         if name == "request_ui_action":
             return f"Shown on the student's screen: {args.get('action')}."
+        if name == "list_clinicians":
+            from app.services import availability
+
+            return llm_gateway.dumps([{"name": availability.profile_out(db, p)["name"], "specialty": p.specialty, "appointment_types": p.appointment_types, "clinic": p.clinic_name} for p in availability.active_profiles(db)])
         if name == "get_ranked_slots":
+            from app.services import availability, dialog
+
+            names = [(p.clinician_id, availability.profile_out(db, p)["name"]) for p in availability.active_profiles(db)]
+            who = (args.get("clinician") or "any").strip()
+            cid = None if who.lower() in ("", "any", "none") else dialog.match_clinician(who, names)
+            if who.lower() not in ("", "any", "none") and cid is None:
+                return llm_gateway.dumps({"error": f"No clinician named '{who}' in this demo.", "clinicians": [n for _, n in names]})
             t = args.get("appointment_type")
-            recs = recommendations(RecommendationIn(appointment_type=None if t in (None, "any") else t), user, db)
-            top = [
-                {"when": f"{o.slot.starts_at:%a %b %d %I:%M %p}", "clinic": o.slot.clinic_name, "travel_min": o.slot.travel_minutes, "reasons": o.reason_codes}
-                for o in recs.options[:3]
-            ]
-            return llm_gateway.dumps({"source_mode": "demo", "calendar_considered": recs.calendar_considered, "top_options": top, "note": "Synthetic demo inventory. The student books on the Appointments screen."})
+            day = args.get("day") or "any"
+            req = SearchIn(appointment_type=t if t and t != "any" else (handle.sched_type or "general_consultation"), clinician_id=cid,
+                           start=None if day == "any" else date.fromisoformat(day), days=1 if day != "any" else 5,
+                           part_of_day=args.get("part_of_day") or "any", sort=args.get("sort") or "best", per_clinician=4)
+            result = search(db, user, req)
+            handle.last_schedule = result  # shown to the student as selectable cards
+            return llm_gateway.dumps({
+                "source_mode": "demo", "notice": result["notice"],
+                "clinicians": [{"name": c["name"], "specialty": c["specialty"], "first_slots": [s["starts_at"] for s in c["slots"][:3]]} for c in result["clinicians"]],
+                "alternatives": {k: [(s["clinician_name"], s["starts_at"]) for s in v[:3]] for k, v in result["alternatives"].items()},
+                "note": "Synthetic demo availability. The student confirms a slot on screen; you cannot book.",
+            })
         if name == "list_calendar_events":
             from app.routers.student import calendar_events
 
@@ -81,6 +97,8 @@ def tool_handler_for(db: Session, user: User):
             return llm_gateway.dumps([{"course": e.course_code or e.title, "start": f"{e.start_at:%I:%M %p}", "end": f"{e.end_at:%I:%M %p}"} for e in ev.events])
         raise ValueError("unknown tool")
 
+    handle.last_schedule = None
+    handle.sched_type = None
     return handle
 
 

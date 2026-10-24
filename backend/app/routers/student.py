@@ -46,9 +46,12 @@ def events_between(db: Session, student: User, start: datetime, end: datetime, t
     )
 
 
-def appointment_summary(appt: Appointment, slot: ClinicSlot, tz: str) -> AppointmentSummary:
+def appointment_summary(appt: Appointment, slot: ClinicSlot, tz: str, db: Session | None = None) -> AppointmentSummary:
+    clinician_id = appt.clinician_id or slot.clinician_id
+    doc = db.get(User, clinician_id) if db is not None and clinician_id else None
     return AppointmentSummary(
-        id=appt.id, state=appt.state, appointment_type=slot.appointment_type, clinic_name=slot.clinic_name,
+        id=appt.id, state=appt.state, clinician_id=clinician_id, clinician_name=doc.display_name if doc else None,
+        appointment_type=appt.appointment_type or slot.appointment_type, clinic_name=slot.clinic_name,
         location=slot.location, starts_at=to_local(slot.starts_at, tz), ends_at=to_local(slot.ends_at, tz),
         source_mode=slot.source_mode,
     )
@@ -87,7 +90,7 @@ def dashboard(user: User = Depends(require_student), db: Session = Depends(get_d
         calendar=ser.calendar(cal) if cal else None,
         courses=[ser.course(c) for c in courses],
         todays_classes=[ser.event(e, tz, codes) for e in events_between(db, user, start, end) if e.kind == "class"],
-        next_appointment=appointment_summary(*next_appt, tz) if next_appt else None,
+        next_appointment=appointment_summary(*next_appt, tz, db) if next_appt else None,
         activity=[ser.activity(a) for a in activity],
     )
 
