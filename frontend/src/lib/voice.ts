@@ -75,6 +75,7 @@ export class VoiceController {
   private silentSince = 0
   private userTalking = false
   private utteranceStart = 0
+  private preroll: ArrayBuffer[] = [] // mic audio captured before the socket opens (otherwise the first word is lost)
   private muted = false
   private rec: SpeechRecognitionLike | null = null
   private turn = 0
@@ -104,7 +105,7 @@ export class VoiceController {
   stop() {
     this.active = false
     try { this.ws?.send(JSON.stringify({ type: 'session.end' })) } catch { /* closing anyway */ }
-    this.ws?.close(); this.ws = null
+    this.ws?.close(); this.ws = null; this.preroll = []
     this.rec?.abort(); this.rec = null
     if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel()
     this.stopPlayback()
@@ -168,7 +169,11 @@ export class VoiceController {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     this.ws = new WebSocket(`${proto}://${location.host}${this.info!.stream_path}`)
     this.ws.binaryType = 'arraybuffer'
-    this.ws.onopen = () => this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
+    this.ws.onopen = () => {
+      this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
+      for (const chunk of this.preroll) this.ws?.send(chunk)
+      this.preroll = []
+    }
     this.ws.onmessage = e => this.onServer(JSON.parse(e.data as string))
     this.ws.onclose = ev => {
       if (!this.active) return
@@ -176,7 +181,9 @@ export class VoiceController {
     }
     node.port.onmessage = (e: MessageEvent<{ level?: number; pcm?: ArrayBuffer }>) => {
       if (e.data.level !== undefined) this.vad(e.data.level)
-      if (e.data.pcm && this.ws?.readyState === WebSocket.OPEN && this.state !== 'THINKING') this.ws.send(e.data.pcm)
+      if (!e.data.pcm || this.state === 'THINKING') return
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(e.data.pcm)
+      else if (this.ws?.readyState === WebSocket.CONNECTING && this.preroll.length < 30) this.preroll.push(e.data.pcm) // ≤3 s
     }
   }
 
