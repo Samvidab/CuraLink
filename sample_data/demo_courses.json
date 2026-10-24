@@ -1,0 +1,9 @@
+{
+  "_note": "FICTIONAL demo course catalog. Every address uses example.com. This file plays the role of a 'verified course catalog source' (TRD §8) for the demo only.",
+  "courses": [
+    { "code": "CS 240", "title": "Programming in C", "instructor_name": "Prof. Mei Chen", "instructor_email": "mei.chen@example.com", "contact_status": "VERIFIED", "color": "bg-sky-500" },
+    { "code": "STAT 350", "title": "Intro to Statistics", "instructor_name": "Prof. Luis Martinez", "instructor_email": "luis.martinez@example.com", "contact_status": "VERIFIED", "color": "bg-teal-500" },
+    { "code": "PHIL 208", "title": "Ethics of Data", "instructor_name": "Prof. Dana Williams", "instructor_email": null, "contact_status": "MISSING", "color": "bg-violet-500" },
+    { "code": "COM 217", "title": "Science Communication", "instructor_name": "Prof. Ravi Patel", "instructor_email": "rpatel.com217@example.com", "contact_status": "NEEDS_REVIEW", "color": "bg-amber-500" }
+  ]
+}
