@@ -44,7 +44,50 @@ def create_all() -> None:
     from app import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(engine())
+    _relax_not_null("handoff_packets", "encounter_id")
     _add_missing_columns()
+
+
+def _relax_not_null(table: str, column: str) -> None:
+    """One-time rebuild for SQLite, which can't drop NOT NULL in place (pre-visit summaries may now exist
+    before an appointment). Copies every row, keeps foreign keys pointing at the table name, and backs the
+    database file up first. No-op when already nullable or on a fresh database."""
+    import logging
+    import shutil
+    from datetime import datetime
+
+    from sqlalchemy import inspect
+    from sqlalchemy.schema import CreateTable
+
+    insp = inspect(engine())
+    cols = {c["name"]: c for c in insp.get_columns(table)}
+    if column not in cols or cols[column]["nullable"]:
+        return
+    db_path = engine().url.database
+    if db_path and db_path != ":memory:":
+        backup = db_path.removesuffix(".db") + f".backup-{datetime.now():%Y%m%d%H%M%S}.db"
+        shutil.copy2(db_path, backup)
+        logging.getLogger("curalink").warning("Upgrading %s.%s to nullable; backup saved to %s", table, column, backup)
+    old = f"_{table}_pre_upgrade"
+    keep = [c for c in cols if c in Base.metadata.tables[table].columns]
+    with engine().connect() as conn:
+        raw = conn.connection.driver_connection
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("PRAGMA legacy_alter_table=ON")  # don't rewrite other tables' references to the old name
+        try:
+            raw.execute("BEGIN")
+            raw.execute(f'ALTER TABLE "{table}" RENAME TO "{old}"')
+            raw.execute(str(CreateTable(Base.metadata.tables[table]).compile(engine())))
+            names = ", ".join(f'"{c}"' for c in keep)
+            raw.execute(f'INSERT INTO "{table}" ({names}) SELECT {names} FROM "{old}"')
+            raw.execute(f'DROP TABLE "{old}"')
+            raw.execute("COMMIT")
+        except Exception:
+            raw.execute("ROLLBACK")
+            raise
+        finally:
+            raw.execute("PRAGMA legacy_alter_table=OFF")
+            raw.execute("PRAGMA foreign_keys=ON")
 
 
 def _add_missing_columns() -> None:

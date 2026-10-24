@@ -29,35 +29,36 @@ def test_conversation_advances_and_never_repeats(student):
 
 def test_fever_asks_for_temperature_once_and_respects_dont_know(student):
     r = say(student, "I have a fever")
-    assert "start" in r["assistant_message"].lower() or "begin" in r["assistant_message"].lower()  # onset first
-    r = say(student, "since last night")
-    assert "temperature" in r["assistant_message"].lower() and r["form"] == {"fields": ["temperature"]}
+    # Fever: ask about a measurement first, with the structured temperature card (never a guessed value).
+    assert "temperature" in r["assistant_message"].lower() and r["form"] == {"fields": ["temperature"]} and "OFFER_TEMPERATURE_INPUT" in r["next_actions"]
     r = say(student, "I don't know, I didn't measure it")
-    assert "leave out your temperature" in r["assistant_message"]
+    assert "haven’t measured it" in r["assistant_message"]
+    r = say(student, "since last night")
+    assert "OFFER_TEMPERATURE_INPUT" not in r["next_actions"]
     for follow in ["still feel bad", "my head hurts too", "what now?"]:
         assert "temperature" not in say(student, follow)["assistant_message"].lower()
     snap = student.get("/api/v1/intake/sessions/current").json()
-    assert "temperature" in snap["declined"] and "temperature" not in {f["key"] for f in snap["fields"]}
+    assert "temperature" in snap["unknown"] and "temperature" not in {f["key"] for f in snap["fields"]}
 
 
 def test_dry_skin_offers_optional_photo_not_temperature(student):
     rs = [say(student, m) for m in ["My skin feels unusually dry", "a few days ago", "it's mostly on my hands"]]
     assert "temperature" not in " ".join(r["assistant_message"] for r in rs).lower()
-    offers = [x for x in rs if "OFFER_PHOTO" in x["next_actions"]]
+    offers = [x for x in rs if "OFFER_PHOTO_UPLOAD" in x["next_actions"]]
     assert len(offers) == 1 and "optional" in offers[0]["assistant_message"].lower()
     onset = {f["key"]: f for f in student.get("/api/v1/intake/sessions/current").json()["fields"]}["onset_text"]
     assert onset["display"] == "a few days ago" and not onset["confirmed_by_student"]
 
 
 def test_bruise_offers_photo_once_and_decline_is_remembered(student):
-    say(student, "I bruised my leg")
-    r = say(student, "yesterday")
-    assert "OFFER_PHOTO" in r["next_actions"] and r["form"] == {"fields": ["photo"]}
-    r = say(student, "no thanks")
+    r = say(student, "I bruised my leg")
+    assert "OFFER_PHOTO_UPLOAD" in r["next_actions"] and r["form"] == {"fields": ["photo"]}  # offered with the first follow-up
+    say(student, "yesterday")
+    r = say(student, "no thanks, no photo")
     assert "leave out a photo" in r["assistant_message"]
     for follow in ["it's a bit purple", "anything else?"]:
         rr = say(student, follow)
-        assert "OFFER_PHOTO" not in rr["next_actions"] and "photo" not in rr["assistant_message"].lower()
+        assert "OFFER_PHOTO_UPLOAD" not in rr["next_actions"] and "photo" not in rr["assistant_message"].lower()
 
 
 def test_just_an_appointment_goes_straight_to_scheduling(student):
@@ -74,11 +75,15 @@ def test_end_and_review_intents(student):
 
 
 def test_state_persists_across_text_and_voice(student):
-    say(student, "I have a fever")
+    say(student, "I have a fever")  # typed: temperature asked
     sid = student.get("/api/v1/intake/sessions/current").json()["session_id"]
     student.patch(f"/api/v1/intake/sessions/{sid}/consent", json={"voice_consent": True})
+    r = say(student, "I haven't measured it", channel="voice")  # spoken answer to the typed question
+    assert "haven’t measured it" in r["assistant_message"]
     r = say(student, "since Monday", channel="voice")
-    assert r["conversation_state"] == "CLARIFYING_INFORMATION" and "temperature" in r["assistant_message"].lower()
+    assert "temperature" not in r["assistant_message"].lower()
+    snap = student.get("/api/v1/intake/sessions/current").json()
+    assert snap["unknown"] == ["temperature"] and [t["channel"] for t in snap["transcript"] if t["from"] == "user"] == ["text", "voice", "voice"]
 
 
 def test_duplicate_turn_ids_are_processed_once(student):

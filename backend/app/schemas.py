@@ -197,6 +197,10 @@ class EncounterDetail(EncounterRow):
     student_id: str
     student_email: str
     appointment_id: str | None
+    purpose: str | None = None  # student's stated reason, verbatim (detail view only; list rows stay symptom-free)
+    absence_requested: bool = False  # requested by the student; never an approval
+    ends_at: datetime | None = None
+    location: str | None = None
 
 
 class SchedulePreferences(BaseModel):
@@ -234,7 +238,16 @@ class IntakeSnapshot(BaseModel):
     missing_fields: list[str]
     skipped_fields: list[str]
     conversation_state: str = "GREETING"
-    declined: list[str] = Field(default_factory=list)
+    declined: list[str] = Field(default_factory=list)  # student chose not to say
+    unknown: list[str] = Field(default_factory=list)  # student said they don't know / haven't measured
+    transcript: list[dict] = Field(default_factory=list)  # this conversation's on-screen messages (student only)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    chief_concern: str | None = None
+    purpose: str | None = None
+    absence_requested: bool = False
+    summary: dict | None = None  # latest submitted pre-visit summary for this session (status, version, sharing target)
+    linked_encounter_id: str | None = None  # appointment booked from this conversation, if any
 
 
 class ConsentIn(BaseModel):
@@ -292,14 +305,23 @@ class SkipIn(BaseModel):
 
 class HandoffIn(BaseModel):
     student_authorized: bool
-    field_keys: list[str] = Field(min_length=1, max_length=10)
+    field_keys: list[str] = Field(default_factory=list, max_length=10)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
+
+
+class SummarySubmitIn(HandoffIn):
+    include_purpose: bool = False  # the student's own stated reason for the visit
+    include_absence_request: bool = False  # whether they asked about absence documentation (a request, not an approval)
+    encounter_id: str | None = None  # empty: the appointment booked from this conversation, else the next one booked
 
 
 class HandoffOut(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     packet_id: str
-    encounter_id: str
+    encounter_id: str | None
+    session_id: str | None = None
+    consent_text: str | None = None
+    clinician_name: str | None = None
     version: int
     status: str
     shared_at: datetime
@@ -327,6 +349,9 @@ class ClinicianIntakeOut(BaseModel):
     consent: dict[str, bool]
     attachments: list[dict] = Field(default_factory=list)
     annotations: dict[str, dict] = Field(default_factory=dict)
+    summary: dict | None = None  # structured AI-assisted pre-visit summary (student-reported only)
+    session: dict | None = None  # which conversation it came from, and when
+    consent_text: str | None = None
 
 
 class VoiceSessionIn(BaseModel):

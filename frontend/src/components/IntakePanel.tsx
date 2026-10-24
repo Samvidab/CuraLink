@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, Card } from './ui'
 import { api, ApiError } from '../lib/api'
@@ -79,7 +78,8 @@ export function KnowsCard({ snap, onEdit, onShare }: { snap: IntakeSnapshot; onE
     {snap.fields.length===0?<p className="mt-4 text-sm text-slate-500">Nothing yet. Describe what’s going on in your own words, or add details in the form.</p>:
     <ul className="mt-4 space-y-3" aria-live="polite">{snap.fields.map(f=><li key={f.key} className={`rounded-xl border p-3 text-sm ${f.confirmed_by_student?'border-teal-200 bg-teal-50/40':'border-amber-200 bg-amber-50/40'}`}><div className="flex items-start justify-between gap-2"><span className="text-xs font-semibold text-slate-500">{f.label}</span><Badge tone={f.provenance==='form'?'blue':'slate'}>{PROVENANCE[f.provenance]}</Badge></div><p className="mt-1 break-words text-slate-800">{f.display}</p><div className="mt-2 flex flex-wrap items-center gap-3"><label className="flex items-center gap-2 text-xs font-semibold"><input type="checkbox" className="size-4 accent-teal-700" checked={f.confirmed_by_student} onChange={e=>confirm(f.key,e.target.checked)}/>{f.confirmed_by_student?'Confirmed':'Is this correct?'}</label><button onClick={onEdit} className="text-xs font-semibold text-teal-700 underline">Correct</button><button onClick={()=>remove(f.key)} className="text-xs font-semibold text-slate-500 underline">Remove</button></div></li>)}</ul>}
     {snap.missing_fields.length>0&&<p className="mt-4 text-xs text-slate-500">Helpful for your clinician: {snap.missing_fields.map(k=>NEEDS[k]??k).join(', ')}. Optional.</p>}
-    <div className="mt-4 grid gap-2"><Button variant="secondary" onClick={onEdit}>Add or correct details</Button><Button disabled={!snap.fields.some(f=>f.confirmed_by_student)} onClick={onShare}>Review what will be sent to your clinician</Button></div>
+    {snap.summary&&<p className="mt-4 rounded-lg bg-slate-50 p-2 text-xs text-slate-600" role="status">Pre-visit summary v{snap.summary.version}: {snap.summary.status==='WITHDRAWN'?'withdrawn':snap.summary.clinician_name?`shared with ${snap.summary.clinician_name}`:'saved — will be shared with the clinician you book next'}.</p>}
+    <div className="mt-4 grid gap-2"><Button variant="secondary" onClick={onEdit}>Add or correct details</Button><Button disabled={!snap.fields.some(f=>f.confirmed_by_student)&&!snap.purpose&&!snap.absence_requested} onClick={onShare}>Review your pre-visit summary</Button></div>
   </Card>
 }
 
@@ -128,41 +128,92 @@ export function IntakeDrawer({ snap, open, onClose, focus }: { snap: IntakeSnaps
     </div></div></div>
 }
 
-/** US-12: student previews and authorizes exactly what the assigned clinician receives. */
+/** Inline temperature entry shown when the assistant asks (structured action OFFER_TEMPERATURE_INPUT).
+ *  Only a number the student enters is stored (as confirmed); "feeling feverish" is never a measurement. */
+export function TemperatureCard({ snap, onSay, disabled }: { snap: IntakeSnapshot; onSay: (text: string) => void; disabled?: boolean }) {
+  const qc = useQueryClient()
+  const [value, setValue] = useState('')
+  const [unit, setUnit] = useState<'F' | 'C'>('F')
+  const [error, setError] = useState('')
+  const save = useMutation({
+    mutationFn: () => api.patch<IntakeSnapshot>(`/intake/sessions/${snap.session_id}/fields`, { fields: [{ key: 'temperature', value: { value: Number(value), unit } }] }),
+    onSuccess: s => { qc.setQueryData(['intake'], s); onSay(`I measured ${value}°${unit}`) },
+    onError: e => setError(e instanceof ApiError ? e.message : 'Could not save.'),
+  })
+  return <div className="mt-2 rounded-2xl border border-teal-200 bg-white p-4" role="group" aria-label="Temperature entry">
+    <p className="text-sm font-semibold">Temperature you measured <span className="font-normal text-slate-500">(optional)</span></p>
+    <form className="mt-2 flex flex-wrap gap-2" onSubmit={e=>{e.preventDefault();if(!value.trim()||Number.isNaN(Number(value)))return setError('Enter the number you measured.');setError('');save.mutate()}}>
+      <input inputMode="decimal" value={value} onChange={e=>setValue(e.target.value)} className="input w-28" placeholder="e.g. 100.4" aria-label="Measured temperature"/>
+      <div className="flex overflow-hidden rounded-xl border border-slate-200" role="radiogroup" aria-label="Unit">{(['F','C'] as const).map(u=><button key={u} type="button" role="radio" aria-checked={unit===u} onClick={()=>setUnit(u)} className={`min-h-10 px-3 text-sm font-semibold ${unit===u?'bg-teal-700 text-white':'bg-white text-slate-700'}`}>°{u}</button>)}</div>
+      <Button type="submit" className="min-h-10 py-1" disabled={disabled||save.isPending}>Save temperature</Button>
+    </form>
+    {error&&<p role="alert" className="mt-2 text-xs text-rose-600">{error}</p>}
+    <div className="mt-3 flex flex-wrap gap-2">{['I haven’t measured it','I don’t know','Skip'].map(t=><Button key={t} variant="ghost" className="min-h-9 py-1 text-xs" disabled={disabled} onClick={()=>onSay(t.replace('’',"'"))}>{t}</Button>)}</div>
+    <p className="mt-2 text-[11px] text-slate-500">CuraLink records only the number you enter and doesn’t interpret it.</p>
+  </div>
+}
+
+/** Inline optional-photo offer (structured action OFFER_PHOTO_UPLOAD); uploading uses the consent-gated drawer. */
+export function PhotoOfferCard({ onAdd, onSay, disabled }: { onAdd: () => void; onSay: (text: string) => void; disabled?: boolean }) {
+  return <div className="mt-2 rounded-2xl border border-teal-200 bg-white p-4" role="group" aria-label="Optional photo">
+    <p className="text-sm font-semibold">Add a photo <span className="font-normal text-slate-500">(optional)</span></p>
+    <p className="mt-1 text-xs leading-5 text-slate-600">JPG, PNG, WebP or iPhone HEIC/HEIF. You’ll be asked for consent before any analysis; any description is not a diagnosis, and you decide whether your clinician sees it.</p>
+    <div className="mt-3 flex flex-wrap gap-2"><Button className="min-h-9 py-1 text-xs" disabled={disabled} onClick={onAdd}>Add a photo</Button><Button variant="ghost" className="min-h-9 py-1 text-xs" disabled={disabled} onClick={()=>onSay('No thanks, no photo')}>No thanks</Button></div>
+  </div>
+}
+
+const ABSENCE_LABEL = { REQUESTED: 'Requested — not medically approved', NOT_REQUESTED: 'Not requested', NOT_SHARED: 'Not shared' } as const
+
+/** Student-reviewed, versioned pre-visit summary of THIS conversation. Nothing unconfirmed can be selected. */
 export function HandoffDialog({ snap, onClose }: { snap: IntakeSnapshot; onClose: () => void }) {
   const qc = useQueryClient()
   const encounters = useQuery({ queryKey: ['my-encounters'], queryFn: () => api.get<StudentEncounter[]>('/students/me/encounters') })
-  const confirmed = snap.fields.filter(f => f.confirmed_by_student)
-  const [keys, setKeys] = useState<string[]>(confirmed.map(f => f.key))
   const photos = usePhotos()
-  const summary = useQuery({ queryKey: ['intake-summary', snap.session_id, snap.fields.length], queryFn: () => api.get<IntakeSummary>('/intake/sessions/current/summary') })
+  const [keys, setKeys] = useState<string[]>(snap.fields.filter(f => f.confirmed_by_student).map(f => f.key))
   const [photoIds, setPhotoIds] = useState<string[]>([]) // default: photos are NOT shared
-  const [encId, setEncId] = useState<string>('')
+  const [purpose, setPurpose] = useState(!!snap.purpose)
+  const [absence, setAbsence] = useState(!!snap.absence_requested)
+  const prior = snap.summary?.status === 'SHARED' ? snap.summary.encounter_id : null
+  const [target, setTarget] = useState<string>(prior ?? snap.linked_encounter_id ?? '')
   const [authorized, setAuthorized] = useState(false)
   const [done, setDone] = useState<Handoff | null>(null)
   const upcoming = (encounters.data ?? []).filter(e => e.status !== 'CANCELLED')
-  const target = upcoming.find(e => e.id === encId) ?? upcoming[0]
+  const chosenEnc = upcoming.find(e => e.id === target)
+  const confirm = (key: string) => api.post<IntakeSnapshot>(`/intake/sessions/${snap.session_id}/fields/${key}/confirm`, { confirmed: true }).then(s => { qc.setQueryData(['intake'], s); setKeys(k => [...k, key]) })
   const share = useMutation({
-    mutationFn: () => api.post<Handoff>(`/encounters/${target!.id}/handoff`, { student_authorized: true, field_keys: keys, attachment_ids: photoIds }),
-    onSuccess: h => { setDone(h); qc.invalidateQueries({ queryKey: ['intake'] }); qc.invalidateQueries({ queryKey: ['my-encounters'] }); qc.invalidateQueries({ queryKey: ['student-dashboard'] }) },
+    mutationFn: () => api.post<Handoff>(`/intake/sessions/${snap.session_id}/summary`, { student_authorized: true, field_keys: keys, attachment_ids: photoIds, include_purpose: purpose, include_absence_request: absence, encounter_id: target || null }),
+    onSuccess: h => { setDone(h); for (const k of ['intake', 'my-encounters', 'student-dashboard']) qc.invalidateQueries({ queryKey: [k] }) },
   })
-  const withdraw = useMutation({ mutationFn: (id: string) => api.post<Handoff>(`/handoffs/${id}/withdraw`), onSuccess: h => { setDone(h); qc.invalidateQueries({ queryKey: ['my-encounters'] }) } })
-  return <div role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/40 p-5"><Card className="w-full max-w-lg p-6">
-    {done?<><Badge tone={done.status==='WITHDRAWN'?'slate':'teal'}>{done.status==='WITHDRAWN'?'WITHDRAWN':'SHARED'}</Badge><h2 id="handoff-title" className="mt-4 text-xl font-semibold">{done.status==='WITHDRAWN'?'Sharing withdrawn':`Shared with ${target?.clinician_name}`}</h2><p className="mt-3 text-sm leading-6 text-slate-600" role="status">{done.status==='WITHDRAWN'?'Your clinician can no longer open this packet. Anything they already viewed can’t be un-seen.':`${done.field_keys.length} detail${done.field_keys.length>1?'s':''}${done.attachment_ids.length?` and ${done.attachment_ids.length} photo${done.attachment_ids.length>1?'s':''}`:''} shared for your ${target?.visit_type.toLowerCase()} (version ${done.version}). You can withdraw it before your clinician reviews it.`}</p><div className="mt-6 flex justify-end gap-2">{done.status==='SHARED'&&<Button variant="danger" disabled={withdraw.isPending} onClick={()=>withdraw.mutate(done.packet_id)}>Withdraw</Button>}<Button onClick={onClose}>Done</Button></div></>
-    :<><h2 id="handoff-title" className="text-xl font-semibold">Review what will be sent to your clinician</h2>
-      {encounters.isLoading?<p className="mt-4 text-sm text-slate-500">Loading…</p>:!target?<p className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">You need a demo appointment first, so CuraLink knows which clinician to share with. <Link to="/student/appointments" className="font-semibold text-teal-700 underline" onClick={onClose}>Find an appointment</Link></p>:<>
-      {upcoming.length>1?<label className="mt-4 block text-sm font-semibold">Appointment<select className="input mt-2" value={target.id} onChange={e=>setEncId(e.target.value)}>{upcoming.map(e=><option key={e.id} value={e.id}>{e.visit_type} · {fmtDay(e.starts_at)} {fmtTime(e.starts_at)} · {e.clinician_name}</option>)}</select></label>:<p className="mt-3 text-sm text-slate-600">For your <b>{target.visit_type.toLowerCase()}</b> on {fmtDay(target.starts_at)} at {fmtTime(target.starts_at)} with <b>{target.clinician_name}</b> <span className="text-xs">(fictional)</span>.</p>}
-      {summary.data&&<div className="mt-4 rounded-xl border border-slate-200 p-3 text-xs leading-5"><p className="font-semibold text-slate-700">Intake summary</p>
-        <p className="mt-1"><b>Reported by you:</b> {Object.values(summary.data.student_reported).flat().map(i=>`${i.label}: ${i.display}`).join(' · ')||'nothing yet'}</p>
-        <p className="mt-1"><b>AI-generated (non-diagnostic):</b> {summary.data.ai_generated.map(i=>i.display).join(' · ')||'none'}</p>
-        <p className="mt-1"><b>Clinician-verified:</b> added by your clinician after the visit</p>
-        {(summary.data.missing.length>0||summary.data.uncertain.length>0)&&<p className="mt-1 text-amber-800"><b>Missing or uncertain:</b> {[...summary.data.missing.map(m=>`${m.label} (not provided)`),...summary.data.uncertain.map(u=>`${u.label} (not confirmed)`)].join(' · ')}</p>}
-        <p className="mt-1 text-slate-500">{summary.data.disclaimer}</p></div>}
-      <fieldset className="mt-5"><legend className="text-sm font-semibold">Details to share</legend><ul className="mt-2 space-y-2">{snap.fields.map(f=><li key={f.key}><label className={`flex items-start gap-3 rounded-xl border p-3 text-sm ${f.confirmed_by_student?'border-slate-200':'border-dashed border-slate-200 opacity-60'}`}><input type="checkbox" disabled={!f.confirmed_by_student} checked={keys.includes(f.key)} onChange={e=>setKeys(k=>e.target.checked?[...k,f.key]:k.filter(x=>x!==f.key))} className="mt-0.5 size-5 accent-teal-700"/><span><span className="block text-xs font-semibold text-slate-500">{f.label} · {PROVENANCE[f.provenance]}</span>{f.display}{!f.confirmed_by_student&&<span className="block text-xs text-amber-700">Confirm this first to share it</span>}</span></label></li>)}</ul></fieldset>
-      {(photos.data?.length ?? 0)>0&&<fieldset className="mt-4"><legend className="text-sm font-semibold">Photos (off unless you choose)</legend><ul className="mt-2 space-y-2">{photos.data!.map(p=><li key={p.id}><label className="flex items-center gap-3 rounded-xl border border-slate-200 p-2 text-sm"><input type="checkbox" checked={photoIds.includes(p.id)} onChange={e=>setPhotoIds(x=>e.target.checked?[...x,p.id]:x.filter(y=>y!==p.id))} className="size-5 accent-teal-700"/><img src={p.image_url} alt="Photo you may share" className="size-12 rounded-lg object-cover"/><span>Share this photo with my clinician</span></label></li>)}</ul></fieldset>}
-      <div className="mt-4 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600"><b>Never shared:</b> raw audio, your conversation transcript, and any photo you don’t tick. <b>Professors</b> never receive any of these details.</div>
-      <label className="mt-4 flex items-start gap-3 text-sm"><input type="checkbox" checked={authorized} onChange={e=>setAuthorized(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I authorize sharing the selected details with my assigned clinician for this appointment.</span></label>
-      {share.error&&<p role="alert" className="mt-3 text-sm text-rose-600">{(share.error as Error).message}</p>}</>}
-      <div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button>{target&&<Button disabled={!authorized||keys.length===0||share.isPending} onClick={()=>share.mutate()}>Share with clinician</Button>}</div></>}
+  const withdraw = useMutation({ mutationFn: (id: string) => api.post<Handoff>(`/handoffs/${id}/withdraw`), onSuccess: h => { setDone(h); qc.invalidateQueries({ queryKey: ['intake'] }); qc.invalidateQueries({ queryKey: ['my-encounters'] }) } })
+  const f = (k: string) => snap.fields.find(x => x.key === k)
+  const temp = f('temperature')
+  const notProvided = (key: string) => (snap.unknown ?? []).includes(key) ? 'Not measured / not known' : (snap.declined ?? []).includes(key) || snap.skipped_fields.includes(key) ? 'Declined' : 'Not provided'
+  const nothing = keys.length === 0 && photoIds.length === 0 && !(purpose && snap.purpose) && !(absence && snap.absence_requested)
+  const pick = (key: string, on: boolean) => setKeys(k => on ? [...k, key] : k.filter(x => x !== key))
+  const row = (key: string, label: string) => { const x = f(key); if (!x) return null
+    return <li key={key}><label className={`flex items-start gap-3 rounded-xl border p-3 text-sm ${x.confirmed_by_student?'border-slate-200':'border-dashed border-amber-300 bg-amber-50/40'}`}><input type="checkbox" disabled={!x.confirmed_by_student} checked={keys.includes(key)} onChange={e=>pick(key,e.target.checked)} className="mt-0.5 size-5 accent-teal-700" aria-label={`Share ${label}`}/><span className="min-w-0 flex-1"><span className="block text-xs font-semibold text-slate-500">{label} · {PROVENANCE[x.provenance]}</span>{x.display}{!x.confirmed_by_student&&<span className="mt-1 flex items-center gap-2 text-xs text-amber-800">Not confirmed yet <button type="button" onClick={()=>confirm(key)} className="font-semibold underline">Confirm this is correct</button></span>}</span></label></li> }
+  return <div role="dialog" aria-modal="true" aria-labelledby="handoff-title" className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-slate-950/40 p-5"><Card className="my-6 w-full max-w-lg p-6">
+    {done?<><Badge tone={done.status==='WITHDRAWN'?'slate':'teal'}>{done.status==='WITHDRAWN'?'WITHDRAWN':'SUBMITTED'}</Badge><h2 id="handoff-title" className="mt-4 text-xl font-semibold">{done.status==='WITHDRAWN'?'Sharing withdrawn':done.clinician_name?`Pre-visit summary submitted to ${done.clinician_name}`:'Pre-visit summary submitted'}</h2><p className="mt-3 text-sm leading-6 text-slate-600" role="status">{done.status==='WITHDRAWN'?'Your clinician can no longer open this summary. Anything they already viewed can’t be un-seen.':`Version ${done.version} of this conversation’s summary is saved${done.clinician_name?` and shared with ${done.clinician_name}`:'. It will be shared with the clinician you book your next appointment with'}. You can withdraw it at any time.`}</p><div className="mt-6 flex justify-end gap-2">{done.status==='SHARED'&&<Button variant="danger" disabled={withdraw.isPending} onClick={()=>withdraw.mutate(done.packet_id)}>Withdraw</Button>}<Button onClick={onClose}>Done</Button></div></>
+    :<><Badge tone="blue">PRE-VISIT SUMMARY</Badge><h2 id="handoff-title" className="mt-3 text-xl font-semibold">Review your pre-visit summary</h2><p className="mt-1 text-sm text-slate-500">From this conversation{snap.started_at?` (started ${fmtDay(snap.started_at)} ${fmtTime(snap.started_at)})`:''}. Correct anything that’s wrong, then choose what to share. It is not a diagnosis.</p>
+      {snap.summary&&snap.summary.status==='SHARED'&&<p className="mt-3 rounded-lg bg-teal-50 p-2 text-xs text-teal-900">Version {snap.summary.version} already submitted{snap.summary.clinician_name?` to ${snap.summary.clinician_name}`:''}. Submitting again saves version {snap.summary.version+1}; earlier versions are kept.</p>}
+      <fieldset className="mt-4"><legend className="text-sm font-semibold">What you reported</legend><ul className="mt-2 space-y-2">
+        {row('symptoms_free_text','Symptoms (your words)')}{row('onset_text','When it started')}{row('onset_date','Onset date')}
+        {temp?row('temperature','Temperature'):<li className="rounded-xl border border-slate-100 p-3 text-sm text-slate-500"><span className="block text-xs font-semibold">Temperature</span>{notProvided('temperature')}</li>}
+        {['appointment_preference','accessibility_needs','requests','photo_observations'].map(k=>row(k, LABEL_FOR[k] ?? k))}
+      </ul></fieldset>
+      {(photos.data?.length ?? 0)>0?<fieldset className="mt-4"><legend className="text-sm font-semibold">Photos from this conversation (off unless you choose)</legend><ul className="mt-2 space-y-2">{photos.data!.map(p=><li key={p.id}><label className="flex items-center gap-3 rounded-xl border border-slate-200 p-2 text-sm"><input type="checkbox" checked={photoIds.includes(p.id)} onChange={e=>setPhotoIds(x=>e.target.checked?[...x,p.id]:x.filter(y=>y!==p.id))} className="size-5 accent-teal-700"/><img src={p.image_url} alt="Photo you may share" className="size-12 rounded-lg object-cover"/><span>Share this photo and its AI-generated, non-diagnostic description</span></label></li>)}</ul></fieldset>:<p className="mt-4 text-sm text-slate-500"><b className="text-slate-700">Photos:</b> none provided.</p>}
+      <fieldset className="mt-4"><legend className="text-sm font-semibold">About the visit</legend><ul className="mt-2 space-y-2">
+        {snap.purpose?<li><label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm"><input type="checkbox" checked={purpose} onChange={e=>setPurpose(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span><span className="block text-xs font-semibold text-slate-500">Reason for visit (your words)</span>{snap.purpose}</span></label></li>:<li className="text-sm text-slate-500">Reason for visit: not stated.</li>}
+        <li><label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3 text-sm"><input type="checkbox" checked={absence} onChange={e=>setAbsence(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span><span className="block text-xs font-semibold text-slate-500">Absence documentation</span>{snap.absence_requested?'I’d like to discuss absence documentation (a request — only your clinician decides).':'Not requested. Tick to let your clinician know you haven’t asked for one.'}</span></label></li>
+      </ul></fieldset>
+      {((snap.unknown?.length ?? 0)>0||(snap.declined?.length ?? 0)>0)&&<p className="mt-3 text-xs text-slate-600"><b>Shown to your clinician as not provided:</b> {[...(snap.unknown ?? []).map(k=>`${LABEL_FOR[k] ?? k} (not known)`),...(snap.declined ?? []).map(k=>`${LABEL_FOR[k] ?? k} (declined)`)].join(' · ')}</p>}
+      <label className="mt-4 block text-sm font-semibold">Share with<select className="input mt-2" value={target} onChange={e=>setTarget(e.target.value)}><option value="">The next appointment I book</option>{upcoming.map(e=><option key={e.id} value={e.id}>{e.clinician_name} · {e.visit_type} · {fmtDay(e.starts_at)} {fmtTime(e.starts_at)}</option>)}</select></label>
+      <div className="mt-4 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600"><b>Never shared:</b> raw audio, your conversation transcript, other conversations, and any photo you don’t tick. <b>Professors</b> never receive any of these details.</div>
+      <label className="mt-4 flex items-start gap-3 text-sm"><input type="checkbox" checked={authorized} onChange={e=>setAuthorized(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I authorize sharing the selected details with {chosenEnc?chosenEnc.clinician_name:'the clinician for this appointment (or the one I book next)'}.</span></label>
+      {share.error&&<p role="alert" className="mt-3 text-sm text-rose-600">{(share.error as Error).message}</p>}
+      <div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!authorized||nothing||share.isPending} onClick={()=>share.mutate()}>Submit pre-visit summary</Button></div></>}
   </Card></div>
 }
+
+const LABEL_FOR: Record<string, string> = { symptoms_free_text: 'Symptoms', onset_text: 'When it started', temperature: 'Temperature', photo: 'Photo', appointment_preference: 'Appointment preference', accessibility_needs: 'Accessibility needs', requests: 'Requests', photo_observations: 'AI photo observations (non-diagnostic)' }
+export { ABSENCE_LABEL }

@@ -138,9 +138,9 @@ export interface ClinicianDashboard {
   encounters: EncounterRow[]
 }
 
-export interface EncounterDetail extends EncounterRow { student_id: string; student_email: string; appointment_id: string | null }
+export interface EncounterDetail extends EncounterRow { student_id: string; student_email: string; appointment_id: string | null; purpose?: string | null; absence_requested?: boolean; ends_at?: string | null; location?: string | null }
 
-export interface ConfirmResult { appointment_id: string; status: string; external_booking: boolean; appointment: AppointmentSummary; message: string }
+export interface ConfirmResult { appointment_id: string; status: string; external_booking: boolean; appointment: AppointmentSummary; message: string; case_id?: string | null; intake_session_id?: string | null; purpose?: string | null; absence_requested?: boolean }
 
 export type Provenance = 'voice' | 'text' | 'form' | 'photo_observation' | 'clinician'
 export interface IntakeField { key: string; label: string; value: Record<string, unknown>; display: string; provenance: Provenance; confirmed_by_student: boolean; updated_at: string }
@@ -156,7 +156,32 @@ export interface IntakeSnapshot {
   skipped_fields: string[]
   conversation_state?: string
   declined?: string[]
+  unknown?: string[]
+  transcript?: TranscriptItem[]
+  started_at?: string | null
+  ended_at?: string | null
+  chief_concern?: string | null
+  purpose?: string | null
+  absence_requested?: boolean
+  summary?: SummaryStatus | null
+  linked_encounter_id?: string | null
 }
+export interface TranscriptItem { from: 'user' | 'ai'; text: string; at: string; channel?: string; actions?: string[]; form?: { fields: string[] } | null; had_schedule?: boolean }
+/** Student-reported pre-visit summary of ONE conversation (backend services/previsit.py). Never a diagnosis. */
+export interface PreVisitSummary {
+  session_id: string; session_started_at: string | null; chief_concern: string | null; symptoms: string[]; onset: string | null
+  measurements: { key: string; label: string; value: number | null; unit: string | null; display: string; source: string }[]
+  other: { key: string; label: string; display: string }[]
+  photos: { attachment_id: string; observer: string; synthetic_demo: boolean; ai_generated: boolean; observations: PhotoAttachment['observations']; limitations: string[] }[]
+  not_known: string[]; declined: string[]; reason_for_visit: string | null; absence_documentation: 'REQUESTED' | 'NOT_REQUESTED' | 'NOT_SHARED'; disclaimer: string
+}
+export interface SummaryStatus { packet_id: string; version: number; status: 'SHARED' | 'SUPERSEDED' | 'WITHDRAWN'; shared_at: string; encounter_id: string | null; clinician_name: string | null; appointment_at: string | null; field_keys: string[]; attachment_ids: string[]; summary: PreVisitSummary }
+export interface HistorySession {
+  session_id: string; label: string; started_at: string; ended_at: string | null; local_date: string; status: string; status_label: string; version: number; packet_id: string; submitted_at: string
+  versions: { version: number; status: string; submitted_at: string }[]; consent_text: string | null; summary: PreVisitSummary | null
+  appointment: { encounter_id: string; starts_at: string; visit_type: string; purpose: string | null } | null
+}
+export interface PreVisitHistory { student_id: string; timezone: string; latest_session_id: string | null; groups: { date: string; sessions: HistorySession[] }[] }
 export interface ToolEvent { tool: string; label: string; status: string }
 export interface IntakeReply {
   session_id: string
@@ -176,9 +201,9 @@ export interface IntakeReply {
 }
 export interface LlmError { category: string; http_status: number | null; error_type: string | null; message: string }
 export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
-export interface Handoff { packet_id: string; encounter_id: string; version: number; status: string; shared_at: string; field_keys: string[]; attachment_ids: string[] }
+export interface Handoff { packet_id: string; encounter_id: string | null; session_id?: string | null; version: number; status: string; shared_at: string; field_keys: string[]; attachment_ids: string[]; consent_text?: string | null; clinician_name?: string | null }
 export interface StudentEncounter { id: string; appointment_id: string | null; starts_at: string; visit_type: string; clinician_name: string; status: string; handoff: Handoff | null; source_mode: SourceMode }
-export interface ClinicianIntake { encounter_id: string; status: 'NOT_SHARED' | 'SHARED' | 'WITHDRAWN'; packet_id: string | null; version: number | null; shared_at: string | null; fields: IntakeField[]; consent: Record<string, boolean>; attachments: PhotoAttachment[]; annotations: Record<string, { decision: 'accepted' | 'corrected' | 'rejected'; corrected_value: string | null; note: string | null; at: string }> }
+export interface ClinicianIntake { encounter_id: string; status: 'NOT_SHARED' | 'SHARED' | 'WITHDRAWN'; packet_id: string | null; version: number | null; shared_at: string | null; fields: IntakeField[]; consent: Record<string, boolean>; attachments: PhotoAttachment[]; annotations: Record<string, { decision: 'accepted' | 'corrected' | 'rejected'; corrected_value: string | null; note: string | null; at: string }>; summary?: PreVisitSummary | null; consent_text?: string | null; session?: { session_id: string; started_at: string | null; ended_at: string | null; intake_complete: boolean; version: number } | null }
 
 export interface Recipient { course_id: string | null; course_code: string; course_title: string | null; instructor_name: string | null; email: string | null; contact_status: ContactStatus | 'STUDENT_CONFIRMED'; deliverable: boolean; blocked_reason: string | null; dates: string[]; meetings: number }
 export interface ImpactDay { date: string; weekday: string; weekend: boolean; meeting_count: number }

@@ -26,19 +26,23 @@ export function ClinicianCard({ c, onPick, selectedId, compact = false, maxSlots
 }
 
 /** Explicit booking confirmation; the backend re-checks availability at this moment. */
-export function SlotConfirmDialog({ slot, onClose, onBooked, onStale }: { slot: ScheduleSlot; onClose: () => void; onBooked: (r: ConfirmResult) => void; onStale: (message: string) => void }) {
+export function SlotConfirmDialog({ slot, onClose, onBooked, onStale, intakeSessionId, purpose: initialPurpose, absence: initialAbsence }: { slot: ScheduleSlot; onClose: () => void; onBooked: (r: ConfirmResult) => void; onStale: (message: string) => void; intakeSessionId?: string; purpose?: string | null; absence?: boolean }) {
   const { me } = useAuth()
   const qc = useQueryClient()
   const [ok, setOk] = useState(false)
   const [key] = useState(newKey)
+  const [purpose, setPurpose] = useState(initialPurpose ?? '')
+  const [absence, setAbsence] = useState(!!initialAbsence)
   const book = useMutation({
-    mutationFn: () => api.post<ConfirmResult>('/appointments/confirm', { slot_id: slot.id, student_approved: true, idempotency_key: key }),
+    mutationFn: () => api.post<ConfirmResult>('/appointments/confirm', { slot_id: slot.id, student_approved: true, idempotency_key: key, intake_session_id: intakeSessionId ?? null, purpose: purpose.trim() || null, absence_requested: absence }),
     onSuccess: r => { for (const k of ['student-dashboard', 'my-appointments', 'my-encounters', 'schedule-search']) qc.invalidateQueries({ queryKey: [k] }); onBooked(r) },
     onError: e => { if (e instanceof ApiError && ['SLOT_UNAVAILABLE', 'CLASS_CONFLICT'].includes(e.code)) { qc.invalidateQueries({ queryKey: ['schedule-search'] }); onStale(e.message) } },
   })
   const rows: [string, string][] = [['Student', me?.display_name ?? ''], ['Clinician', slot.clinician_name], ['Appointment type', slot.appointment_label], ['Date', fmtDay(slot.starts_at, undefined, { weekday: 'long', month: 'long', day: 'numeric' })], ['Time', `${fmtRange(slot.starts_at, slot.ends_at)} (${slot.minutes} min)`], ['Location', `${slot.clinic_name}${slot.location ? `, ${slot.location}` : ''}`]]
   return <div role="dialog" aria-modal="true" aria-labelledby="confirm-title" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-5"><Card className="w-full max-w-md p-6"><Badge tone="amber">DEMO BOOKING</Badge><h2 id="confirm-title" className="mt-4 text-xl font-semibold">Confirm this appointment?</h2>
     <dl className="mt-4 space-y-2 text-sm">{rows.map(([k,v])=><div key={k} className="flex justify-between gap-4"><dt className="text-slate-500">{k}</dt><dd className="text-right font-semibold">{v}</dd></div>)}</dl>
+    <label className="mt-4 block text-sm font-semibold">Reason for visit <span className="font-normal text-slate-500">(optional, your words)</span><input value={purpose} maxLength={300} onChange={e=>setPurpose(e.target.value)} className="input mt-2" placeholder="e.g. checkup, follow-up, absence note"/></label>
+    <label className="mt-3 flex items-start gap-3 text-sm"><input type="checkbox" checked={absence} onChange={e=>setAbsence(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I’d like to discuss absence documentation <span className="text-slate-500">(a request — only the clinician decides)</span></span></label>
     <p className="mt-4 rounded-xl bg-sky-50 p-3 text-sm text-sky-800">Demo appointment — not booked with a real clinic. Availability is re-checked when you confirm.</p>
     <label className="mt-4 flex items-start gap-3 text-sm"><input type="checkbox" checked={ok} onChange={e=>setOk(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I want to book this simulated appointment with {slot.clinician_name}.</span></label>
     {book.error&&!(book.error instanceof ApiError&&['SLOT_UNAVAILABLE','CLASS_CONFLICT'].includes(book.error.code))&&<p role="alert" className="mt-3 text-sm text-rose-600">{(book.error as Error).message}</p>}

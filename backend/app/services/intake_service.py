@@ -50,6 +50,20 @@ def current_session(db: Session, student: User, create: bool = True) -> IntakeSe
     return sess
 
 
+def close_untranscribed_sessions(db: Session) -> int:
+    """Upgrade step: conversations started before transcripts were kept can't be shown on reopening, so continuing
+    them would silently reuse old answers. End them (nothing is deleted); the student's next visit starts fresh."""
+    n = 0
+    for sess in db.scalars(select(IntakeSession).where(IntakeSession.status == "OPEN")).all():
+        conv = sess.conversation or {}
+        if conv.get("turn", 0) > 0 and "transcript" not in conv:
+            sess.status, sess.ended_at = "CLOSED", sess.ended_at or sess.updated_at
+            n += 1
+    if n:
+        db.commit()
+    return n
+
+
 def fields_of(db: Session, sess: IntakeSession) -> dict[str, IntakeField]:
     return {f.key: f for f in db.scalars(select(IntakeField).where(IntakeField.session_id == sess.id))}
 
@@ -139,11 +153,25 @@ def _has_photo(db: Session, sess: IntakeSession) -> bool:
     return db.scalar(select(Attachment.id).where(Attachment.session_id == sess.id)) is not None
 
 
-def _remember(db: Session, sess: IntakeSession, conv: dict, client_turn_id: str | None, reply: "Reply") -> "Reply":
+TRANSCRIPT_LIMIT = 80
+
+
+def _remember(db: Session, sess: IntakeSession, conv: dict, client_turn_id: str | None, reply: "Reply", text: str = "", channel: str = "text") -> "Reply":
     if client_turn_id:
         cache = dict(conv.get("processed", {}))
         cache[client_turn_id] = {k: v for k, v in reply.__dict__.items()}
         conv["processed"] = dict(list(cache.items())[-10:])
+    # What was said on screen in THIS conversation (text and voice alike), so reopening shows it instead of a
+    # blank chat silently continuing. Shown only to the student; never part of a clinician summary.
+    now = utcnow().isoformat()
+    conv["transcript"] = (list(conv.get("transcript", [])) + [
+        {"from": "user", "text": text, "channel": channel, "at": now},
+        {"from": "ai", "text": reply.assistant_message, "actions": reply.next_actions, "form": reply.form, "had_schedule": bool(reply.schedule), "at": now},
+    ])[-TRANSCRIPT_LIMIT:]
+    sess.chief_concern = conv.get("chief_concern") or sess.chief_concern
+    sess.purpose = conv.get("purpose") or sess.purpose
+    sess.absence_requested = bool(conv.get("absence_requested")) or bool(sess.absence_requested)
+    sess.updated_at = utcnow()
     sess.conversation = dict(conv)  # reassign so SQLAlchemy persists the JSON change
     db.commit()
     return reply
@@ -162,66 +190,84 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
     if check.state == "EMERGENCY_GUIDANCE":
         sess.safety_state = "EMERGENCY_GUIDANCE"
         audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="SAFETY_ESCALATION_SHOWN", object_type="intake_session", object_id=sess.id, detail=check.category)
-        return _remember(db, sess, conv, client_turn_id, Reply(sess.id, check.message or "", "EMERGENCY_GUIDANCE", check.category, ["EMERGENCY_HELP"], mode="safety", conversation_state=conv.get("state", "GREETING"), turn_id=turn_id))
+        return _remember(db, sess, conv, client_turn_id, Reply(sess.id, check.message or "", "EMERGENCY_GUIDANCE", check.category, ["EMERGENCY_HELP"], mode="safety", conversation_state=conv.get("state", "GREETING"), turn_id=turn_id), text, channel)
 
     from app.models import Calendar  # local import keeps module import graph simple
 
     has_calendar = db.scalar(select(Calendar.id).where(Calendar.student_id == student.id)) is not None
-    fallback_reason = None
-    if llm_gateway.available():
+    dialog.note_context(conv, text)
+    names, last = _schedule_context(db, student)
+    sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)  # uses the PREVIOUS state
+    live = llm_gateway.available()
+    fallback_reason = None if live else (llm_gateway.detail() if get_settings().anthropic_api_key else None)
+
+    # 1) Deterministic extraction. Scripted mode stores it; Claude mode only uses it to decide the next step
+    #    (Claude's own validated proposals are what get stored).
+    extracted, notes = extract(text)
+    looks_like_onset = bool(dialog.TIME_WORDS.search(text)) or not dialog.describes_concern(text)  # "swollen and bruised" isn't a time
+    if conv.get("pending") == "onset_text" and not any(e.key == "onset_text" for e in extracted) and len(text) <= 80 and not dialog.DECLINE.search(text) and looks_like_onset:
+        from app.services.intake_fields import Extracted
+
+        # A short direct answer to "When did this start?" is the onset, in the student's own words.
+        extracted = [e for e in extracted if e.key != "symptoms_free_text"] + [Extracted("onset_text", {"text": text})]
+    if live:
+        updated = [e.key for e in extracted]
+        displays = {**_field_displays(db, sess), **{e.key: display(e.key, e.value) for e in extracted}}
+    else:
+        updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
+        db.flush()
+        displays = _field_displays(db, sess)
+
+    # 2) ONE decision for both modes: which follow-up and which structured component (temperature card,
+    #    photo card, scheduling cards). Made before Claude speaks so its words match what's on screen.
+    plan = dialog.plan(conv, text, updated, displays, _has_photo(db, sess), has_calendar, notes)
+    conv["state"] = plan.state
+    actions, form = list(plan.actions), plan.form
+    schedule = None
+    if sched is not None:
+        schedule = _run_search(db, student, conv, sched)  # real lookup against stored availability
+        conv["state"] = "COORDINATING_APPOINTMENT"
+        offers = [a for a in actions if a in (dialog.OFFER_TEMPERATURE, dialog.OFFER_PHOTO)]
+        if not offers:  # a pure scheduling turn: no pending follow-up
+            conv["pending"], form = None, None
+        actions = list(dict.fromkeys([dialog.SCHEDULING, *offers] + ([] if has_calendar else ["IMPORT_CALENDAR"])))
+
+    if live:
         name = profile_names.address_name(student)
         context = (f"demo date {get_settings().demo_today.isoformat()}; calendar imported: {has_calendar}; channel: {channel}; "
                    + (f"student's preferred name: {name}; " if name else "")
-                   + dialog.context_for_model(conv, _field_displays(db, sess)))
-        names, last = _schedule_context(db, student)
-        sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)
+                   + dialog.context_for_model(conv, _field_displays(db, sess)) + " " + dialog.directive(plan)
+                   + (" Real appointment options are on screen as clinician cards; summarize them briefly." if schedule else ""))
         tool_handler.sched_type = _appointment_type_for(conv, sched or {})
         try:
             turn = await llm_gateway.run_turn(history, text, context, tool_handler)
-            updated = _apply_proposed(db, sess, turn.proposed_fields, channel)
+            claude_updated = _apply_proposed(db, sess, turn.proposed_fields, channel)
             reply_text, guarded = safety.guard_output(turn.text or "")
             if guarded:
                 audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_OUTPUT_GUARDED", object_type="intake_session", object_id=sess.id)
-            # The dialog manager still tracks state/declines and supplies actions; Claude supplies the words.
-            plan = dialog.plan(conv, text, updated, _field_displays(db, sess), _has_photo(db, sess), has_calendar, [])
-            conv["state"] = plan.state
             reply_text = dialog.avoid_repeat(conv, reply_text or plan.text, plan.text)
-            actions = list(dict.fromkeys(turn.ui_actions + plan.actions))
-            schedule = getattr(tool_handler, "last_schedule", None) or (_run_search(db, student, conv, sched) if sched is not None else None)
+            schedule = schedule or getattr(tool_handler, "last_schedule", None)
+            extra = [a for a in turn.ui_actions if a in (dialog.SCHEDULING, "START_CASE", "IMPORT_CALENDAR")]
             if schedule:
                 conv["state"] = "COORDINATING_APPOINTMENT"
-                actions = list(dict.fromkeys(["FIND_CARE", *actions]))
-            reply = Reply(sess.id, reply_text, "GENERAL_SUPPORT", None, actions, turn.tool_events, updated, missing(db, sess), "claude", conv["state"], plan.form, turn_id, None, schedule)
-            return _remember(db, sess, conv, client_turn_id, reply)
+                extra.append(dialog.SCHEDULING)
+            actions = list(dict.fromkeys(actions + extra))
+            reply = Reply(sess.id, reply_text, "GENERAL_SUPPORT", None, actions, turn.tool_events, claude_updated, missing(db, sess), "claude", conv["state"], form, turn_id, None, schedule)
+            return _remember(db, sess, conv, client_turn_id, reply, text, channel)
         except llm_gateway.LlmUnavailable as exc:
             audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_FALLBACK", detail=str(exc)[:40])
             fallback_reason = llm_gateway.detail() or {"category": str(exc), "http_status": None, "error_type": None, "message": ""}
-    elif get_settings().anthropic_api_key:
-        fallback_reason = llm_gateway.detail()  # paused after an account-level error
+            # Same decision, scripted words: store what the deterministic extractor found.
+            updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
 
-    extracted, notes = extract(text)
-    # A short direct answer to "When did this start?" is the onset, in the student's own words.
-    if conv.get("pending") == "onset_text" and not any(e.key == "onset_text" for e in extracted) and len(text) <= 80 and not dialog.DECLINE.search(text):
-        from app.services.intake_fields import Extracted
-
-        extracted = [e for e in extracted if e.key != "symptoms_free_text"] + [Extracted("onset_text", {"text": text})]
-    updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
-    db.flush()
-    names, last = _schedule_context(db, student)
-    sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)  # uses the PREVIOUS state
-    plan = dialog.plan(conv, text, updated, _field_displays(db, sess), _has_photo(db, sess), has_calendar, notes)
-    conv["state"] = plan.state
     text_out = _resources(text) if not updated and not plan.pending and plan.state == "COLLECTING_INITIAL_CONCERN" and _resources(text) else plan.text
-    schedule, actions, form = None, plan.actions, plan.form
-    if sched is not None:  # real lookup; the reply text summarises what the backend returned
-        schedule = _run_search(db, student, conv, sched)
+    if schedule is not None:  # the reply text summarises what the backend actually returned
         ack = dialog._ack(updated, _field_displays(db, sess))
-        text_out = " ".join(x for x in (ack, dialog.describe_schedule(schedule, sched)) if x)
-        conv["state"], conv["pending"], form = "COORDINATING_APPOINTMENT", None, None
-        actions = ["FIND_CARE"] + ([] if has_calendar else ["IMPORT_CALENDAR"])
+        follow = plan.text if form else ""
+        text_out = " ".join(x for x in (ack, dialog.describe_schedule(schedule, sched or {}), follow if follow != ack else "") if x)
     text_out = dialog.avoid_repeat(conv, text_out, "Would you like to review your information, find an appointment, or add something else?")
     reply = Reply(sess.id, text_out, "GENERAL_SUPPORT", None, actions, [], updated, missing(db, sess), "scripted", conv["state"], form, turn_id, fallback_reason, schedule)
-    return _remember(db, sess, conv, client_turn_id, reply)
+    return _remember(db, sess, conv, client_turn_id, reply, text, channel)
 
 
 def _resources(text: str) -> str | None:

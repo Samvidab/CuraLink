@@ -22,6 +22,7 @@ test('a new visitor sees the welcome page and is never signed in as Sam', async 
 })
 
 test('new student: sign up, asked for a name once, greeted by preferred name, can change it', async ({ page }) => {
+  test.setTimeout(150_000) // long flow; first visits compile pages on the dev server
   await page.goto('/')
   await page.getByRole('button', { name: /I'm a student/ }).click()
   await page.getByRole('button', { name: 'New to CuraLink? Create a student account' }).click()

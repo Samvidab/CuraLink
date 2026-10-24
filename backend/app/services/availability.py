@@ -37,14 +37,19 @@ def duration(appointment_type: str) -> timedelta:
 # CURALINK_CONFIG: DEMO_CLINICIAN_AVAILABILITY
 # Fictional working hours/exceptions live in sample_data/demo_availability.json and are loaded at demo reset.
 # Production: replace with the clinic's scheduling system feed (same tables). Never presented as a real calendar.
-def load_demo(db: Session) -> None:
+def load_demo(db: Session, only_missing: bool = False) -> list[str]:
+    """Insert demo clinician profiles, weekly hours and exceptions. With only_missing=True (existing databases)
+    it touches ONLY clinicians that have no profile yet and never changes student calendars, appointments,
+    bookings or cases. Returns the clinician ids it configured."""
     s = get_settings()
     data = json.loads((s.sample_data_dir / "demo_availability.json").read_text())
     users = json.loads((s.sample_data_dir / "demo_users.json").read_text())
+    configured: list[str] = []
     for c in users["clinicians"]:
         p = c.get("profile")
-        if not p:
+        if not p or (only_missing and (db.get(ClinicianProfile, c["id"]) is not None or db.get(User, c["id"]) is None)):
             continue
+        configured.append(c["id"])
         clinic = data["clinics"][p["clinic_id"]]
         db.add(ClinicianProfile(
             clinician_id=c["id"], specialty=p["specialty"], clinic_id=p["clinic_id"], clinic_name=clinic["name"], location=clinic.get("location"),
@@ -52,11 +57,36 @@ def load_demo(db: Session) -> None:
             attributes=p.get("attributes", {}), bio=p.get("bio"), photo_url=p.get("photo_url"),
         ))
     for r in data["weekly"]:
+        if r["clinician_id"] not in configured:
+            continue
         for wd in r["weekdays"]:
             db.add(AvailabilityRule(clinician_id=r["clinician_id"], weekday=WEEKDAYS[wd], start_time=r["start"], end_time=r["end"]))
     for e in data["exceptions"]:
+        if e["clinician_id"] not in configured:
+            continue
         d0 = date.fromisoformat(e["date"])
         db.add(AvailabilityException(clinician_id=e["clinician_id"], start_date=d0, end_date=date.fromisoformat(e.get("end_date", e["date"])), kind=e["kind"], start_time=e.get("start"), end_time=e.get("end"), reason=e.get("reason")))
+    return configured
+
+
+def ensure_demo_data(db: Session) -> dict:
+    """Safe upgrade for demo databases created before clinician-aware scheduling (they have clinicians but no
+    profiles or hours, so no clinician cards or times could ever appear). Adds only what is missing:
+      - demo clinician profiles/hours/exceptions for clinicians without a profile
+      - clinician_id/appointment_type on older appointments, copied from their booked slot
+    Nothing is reset or deleted. Run explicitly with: uv run python -m app.admin seed-availability"""
+    from app.models import Appointment
+
+    added = load_demo(db, only_missing=True)
+    fixed = 0
+    for appt in db.scalars(select(Appointment).where(Appointment.clinician_id.is_(None))).all():
+        slot = db.get(ClinicSlot, appt.slot_id)
+        if slot is not None and slot.clinician_id:
+            appt.clinician_id, appt.appointment_type = slot.clinician_id, appt.appointment_type or slot.appointment_type
+            fixed += 1
+    if added or fixed:
+        db.commit()
+    return {"clinicians_configured": added, "appointments_backfilled": fixed}
 
 
 @dataclass(frozen=True)

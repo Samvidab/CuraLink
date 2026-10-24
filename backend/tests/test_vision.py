@@ -82,10 +82,14 @@ def test_photo_reaches_only_the_assigned_clinician_when_selected(student, clinic
     view = clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/intake").json()
     assert view["attachments"] == [] and view["consent"]["photo_shared"] is False
     assert clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/attachments/{att['id']}").status_code == 403
-    # Student explicitly shares the photo in a new session-less re-share is not possible; new packet for new session:
-    # (photo belonged to the now-closed session) -> rejected
+    # A corrected re-share of the SAME conversation is version 2 and may include the photo; v1 is kept.
     r = student.post(f"/api/v1/encounters/{enc['id']}/handoff", json={"student_authorized": True, "field_keys": ["photo_observations"], "attachment_ids": [att["id"]]})
-    assert r.status_code in (409, 422)
+    assert r.status_code == 200 and r.json()["version"] == 2
+    assert clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/attachments/{att['id']}").status_code == 200
+    # A photo never moves into a different conversation's summary.
+    new_sid = student.post("/api/v1/intake/sessions/new").json()["session_id"]
+    r = student.post(f"/api/v1/intake/sessions/{new_sid}/summary", json={"student_authorized": True, "attachment_ids": [att["id"]]})
+    assert r.status_code == 422 and r.json()["code"] == "UNKNOWN_ATTACHMENT"
 
 
 def test_photo_sharing_and_clinician_review(student, clinician, login):

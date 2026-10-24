@@ -16,12 +16,12 @@ from app import serializers as ser
 from app.config import get_settings
 from app.db import get_db
 from app.errors import ApiError
-from app.models import Appointment, Calendar, CalendarEvent, ClinicianProfile, ClinicSlot, Course, Encounter, User
+from app.models import Appointment, Calendar, CalendarEvent, ClinicianProfile, ClinicSlot, Course, Encounter, IntakeField, IntakeSession, User
 from app.routers.student import appointment_summary
 from app.routers.system import _demo_only
 from app.schemas import AppointmentSummary, BlockIn, CalendarEventOut, SchedulePreferences
 from app.security import require_student
-from app.services import audit, availability, scheduling, terms
+from app.services import audit, availability, previsit, scheduling, terms
 from app.timeutil import as_utc, demo_now, to_local, utcnow
 
 router = APIRouter(prefix="/api/v1", tags=["scheduling"])
@@ -45,6 +45,9 @@ class ConfirmIn(BaseModel):
     slot_id: str
     student_approved: bool
     idempotency_key: str = Field(min_length=8, max_length=80)
+    intake_session_id: str | None = None  # the conversation this booking came from (default: the open one, if it has content)
+    purpose: str | None = Field(None, max_length=300)  # student's own words; never inferred symptoms
+    absence_requested: bool | None = None  # student wants to DISCUSS absence documentation; not an approval
 
 
 def _now() -> datetime:
@@ -186,18 +189,40 @@ def confirm(body: ConfirmIn, user: User = Depends(require_student), db: Session 
     conflicts = scheduling.find_conflicts(scheduling.Slot(cand.id, cand.starts_at, cand.ends_at, cand.appointment_type, profile.travel_minutes), busy_for(db, user, cand.starts_at - timedelta(hours=3), cand.ends_at + timedelta(hours=3)))
     if any(c.kind in ("CLASS_OVERLAP", "PERSONAL_BLOCK") for c in conflicts):
         raise ApiError(409, "CLASS_CONFLICT", "This time overlaps with your schedule or another appointment. Pick another option.", details={"conflicts": [c.label.removeprefix("Personal: ") for c in conflicts]})
+    sess = _booking_session(db, user, body.intake_session_id)
     slot = availability.book(db, cand, profile)
-    appt = Appointment(id=f"apt_{uuid4().hex[:10]}", student_id=user.id, slot_id=slot.id, clinician_id=cand.clinician_id, appointment_type=cand.appointment_type, state="DEMO_CONFIRMED", confirmation_mode="demo", idempotency_key=body.idempotency_key)
+    purpose = (body.purpose or "").strip() or (sess.purpose if sess else None)
+    absence = body.absence_requested if body.absence_requested is not None else bool(sess and sess.absence_requested)
+    appt = Appointment(id=f"apt_{uuid4().hex[:10]}", student_id=user.id, slot_id=slot.id, clinician_id=cand.clinician_id, appointment_type=cand.appointment_type, state="DEMO_CONFIRMED",
+                       confirmation_mode="demo", idempotency_key=body.idempotency_key, intake_session_id=sess.id if sess else None, purpose=purpose, absence_requested=absence)
     db.add(appt)
-    db.add(Encounter(id=f"enc_{uuid4().hex[:10]}", student_id=user.id, clinician_id=cand.clinician_id, appointment_id=appt.id, starts_at=cand.starts_at, visit_type=TYPE_LABEL.get(cand.appointment_type, cand.appointment_type), status="UPCOMING"))
-    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DEMO_CONFIRMED", object_type="appointment", object_id=appt.id, from_state="OFFERED", to_state="DEMO_CONFIRMED", detail=f"clinician {cand.clinician_id}")
+    db.flush()
+    enc = Encounter(id=f"enc_{uuid4().hex[:10]}", student_id=user.id, clinician_id=cand.clinician_id, appointment_id=appt.id, starts_at=cand.starts_at, visit_type=TYPE_LABEL.get(cand.appointment_type, cand.appointment_type), status="UPCOMING")
+    db.add(enc)
+    db.flush()
+    attached = previsit.attach_pending(db, user.id, enc)  # summaries the student approved "for the clinician I book next"
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DEMO_CONFIRMED", object_type="appointment", object_id=appt.id, from_state="OFFERED", to_state="DEMO_CONFIRMED",
+                 detail=f"clinician {cand.clinician_id}; case {enc.id}" + (f"; session {sess.id}" if sess else "") + ("; absence documentation requested" if absence else "") + (f"; {attached} summaries attached" if attached else ""))
     db.commit()
     return _confirm_out(db, appt, tz, "Demo appointment — not booked with a real clinic.")
 
 
+def _booking_session(db: Session, user: User, session_id: str | None) -> IntakeSession | None:
+    if session_id:
+        sess = db.get(IntakeSession, session_id)
+        if sess is None or sess.student_id != user.id:
+            raise ApiError(404, "NOT_FOUND", "Conversation not found.")
+        return sess
+    sess = db.scalar(select(IntakeSession).where(IntakeSession.student_id == user.id, IntakeSession.status == "OPEN").order_by(IntakeSession.created_at.desc()))
+    has_content = sess is not None and (sess.chief_concern or sess.purpose or db.scalar(select(IntakeField.id).where(IntakeField.session_id == sess.id)))
+    return sess if has_content else None
+
+
 def _confirm_out(db: Session, appt: Appointment, tz: str, message: str) -> dict:
     slot = db.get(ClinicSlot, appt.slot_id)
-    return {"appointment_id": appt.id, "status": appt.state, "external_booking": False, "appointment": appointment_summary(appt, slot, tz, db).model_dump(), "message": message}
+    enc = db.scalar(select(Encounter).where(Encounter.appointment_id == appt.id))
+    return {"appointment_id": appt.id, "status": appt.state, "external_booking": False, "appointment": appointment_summary(appt, slot, tz, db).model_dump(), "message": message,
+            "case_id": enc.id if enc else None, "intake_session_id": appt.intake_session_id, "purpose": appt.purpose, "absence_requested": bool(appt.absence_requested)}
 
 
 @router.get("/appointments/me", response_model=list[AppointmentSummary])

@@ -59,8 +59,13 @@ SAFE_REPLACEMENT = (
 )
 
 
+# Disclaimers ("this is not a diagnosis", "it won't give you a diagnosis", "I can't diagnose") are the opposite
+# of diagnosing and must not trigger the guard; they're removed before the check.
+_NEGATED = re.compile(r"\b(not|no|never|won'?t|can'?t|cannot|doesn'?t|don'?t|isn'?t|aren'?t|without)(?:\s+[\w']+){0,4}?\s+diagnos\w*", re.I)
+
+
 def guard_output(text: str) -> tuple[str, bool]:
     """Replace model output that drifts into diagnosis, dosing or reassurance."""
-    if _DIAGNOSTIC.search(text or ""):
+    if _DIAGNOSTIC.search(_NEGATED.sub(" ", text or "")):
         return SAFE_REPLACEMENT, True
     return text, False

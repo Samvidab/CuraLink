@@ -73,6 +73,25 @@ Key rules enforced on the server, not in prompts:
 - Sending requires: student disclosure consent (re-checked at send time) + latest **signed** version + matching hash + unchanged approved recipients + verified, allowlisted addresses. Any edit creates a new unsigned version.
 - Audit events never contain symptoms, transcripts or document bodies.
 
+### Intake, appointments and pre-visit summaries
+
+```
+User (student) ─< IntakeSession (one per conversation; created_at = start, ended_at, chief concern, purpose, absence request)
+                    ├─< IntakeField (student-confirmed values, provenance)      ├─< Attachment (photos stay with their session)
+                    └─< HandoffPacket = pre-visit summary, versioned per session (SHARED / SUPERSEDED / WITHDRAWN)
+                             └── encounter_id ──> Encounter (the case) ──> Appointment (clinician, type, time, purpose,
+                                  (empty until booked)        │                absence_requested, intake_session_id)
+                                                              └── clinician_id ─> User (clinician) — access follows this
+```
+
+- **Contextual intake:** the dialog manager (`services/dialog.py`) decides the next step once per turn, before Claude is called. It emits structured actions: `OFFER_TEMPERATURE_INPUT`, `OFFER_PHOTO_UPLOAD`, `ASK_FOLLOW_UP`, `REVIEW_INTAKE` and `FIND_CARE` (scheduling). Claude is told what is on screen. The frontend renders cards from these actions and never parses sentences, and the scripted fallback produces the same actions.
+- **Summaries:** the student reviews and selects confirmed details and photos, then authorizes. The snapshot becomes version N of that conversation, and older versions are kept as SUPERSEDED. A summary approved before booking is attached when the student books; one approved after booking goes to the appointment booked from that conversation.
+- **Clinician view:** clinicians see summaries only through encounters assigned to them. The patient page shows the latest approved summary, plus *AI-Assisted Pre-Visit History* grouped by each conversation's local start date, newest first, never merged. Withdrawal hides the content on the next access and is audited.
+- **Database upgrade:** existing demo databases are upgraded in place on startup and nothing is reset.
+  - New columns are added as nullable.
+  - `handoff_packets.encounter_id` becomes nullable through a one-time table rebuild. The database file is backed up first as `backend/curalink_demo.backup-<timestamp>.db`.
+  - Missing demo clinician hours are added (also available as `uv run python -m app.admin seed-availability`).
+
 ## Manual configuration
 
 Everything the team must supply by hand is in **[docs/MANUAL_SETUP_CHECKLIST.md](docs/MANUAL_SETUP_CHECKLIST.md)**; every `CURALINK_CONFIG` / `TODO(CURALINK-MANUAL)` marker is indexed in **[docs/DEVELOPER_CONFIGURATION.md](docs/DEVELOPER_CONFIGURATION.md)**.
@@ -109,9 +128,12 @@ Acceptance tests from the Implementation Plan covered in code: AT-01–AT-14, AT
 ## Demo script (~3 min)
 
 1. **Student** → “I'm a student” → *Use demo student account* → Sign in (Sam's profile is complete, so this opens the dashboard) → *Settings → Import calendar* → *Use fictional sample calendar* (note the timezone, the moved STAT 350 meeting, and the course with no instructor contact).
-2. **Talk to CuraLink** → type or speak “I've had a sore throat and a fever of 100.8 F since yesterday”. Watch “What CuraLink knows” fill in with provenance; confirm each item. Try “I have chest pain” to see the safety stop.
-3. **Appointments**: clinician cards with times that fit your classes. Pick Dr. Avery Rivera, Mon 10:30 AM, review the details, tick the box and confirm. Or ask the assistant “Which doctors are available?”, then “Can I see Dr. Rivera?”. Dr. Rivera sees the appointment and Dr. Hale doesn't.
-4. Back in **Talk to CuraLink** → *Review what will be sent to your clinician* → share selected fields.
+2. **Talk to CuraLink** → *Start new conversation*.
+   - Say “I have a rash on my arm”: an optional photo card appears. Add the synthetic HEIC from `sample_data/demo_images/`, confirm the details, then *Review your pre-visit summary* → tick the photo → authorize → submit.
+   - *Start new conversation* again and say “I've had a fever and headache since yesterday. I missed class and want to discuss an absence note.” A temperature card appears; enter 100.8 °F. Confirm, review, submit.
+   - Try “I have chest pain” to see the safety stop.
+3. Ask “Which doctors are available?”, then “Can I see Dr. Rivera?”, pick a time and confirm. The *Appointments* page offers the same clinician cards.
+4. As **Dr. Rivera**, open Sam Lee. The latest summary shows the temperature and the absence request (*requested, not medically approved*), and *AI-Assisted Pre-Visit History* lists Session 1 and Session 2 separately. As Dr. Hale, Sam isn't visible.
 5. **My Cases** → request review for Wed–Fri → fix the missing PHIL 208 contact → consent → submit.
 6. **Clinician** (second browser) → Signature Settings → **draw a signature** → Save → Absence Cases → Sam Lee → review the shared intake (accept/correct) → enter examination findings → *Approve an absence period* → type the dates → *Save absence period* (affected classes appear only now) → *Generate document* → *Approve & sign this version* (re-enter password) → *Send authorized copies*.
 7. Open the **test inbox**: minimal-disclosure notices, no symptoms. Student's **My Cases** shows “Delivered to test inbox … your university decides”.

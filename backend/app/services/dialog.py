@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 
 FEVER = re.compile(r"\b(fever\w*|temperature|temp\b|chills|feel(ing)? hot|sweats|burning up)\b", re.I)
 VISIBLE = re.compile(r"\b(rash\w*|dry|flak\w*|itch\w*|bruis\w*|swell\w*|swollen|red(ness)?|bump\w*|cut|scrape\w*|burn(ed|t)?\b|spot\w*|hives|blister\w*|skin|lump\w*|bite\w*|wound)\b", re.I)
-DECLINE = re.compile(r"^\s*(no|nope|nah|skip|pass)\b|(i\s*)?(don'?t|do not) know|not sure|no idea|didn'?t (measure|check|take)|haven'?t (measured|checked|taken)|rather not|prefer not|no thanks|can'?t remember|unsure", re.I)
+INJURY = re.compile(r"\b(twist\w*|sprain\w*|injur\w*|fell|fallen|tripped|rolled|jammed|pulled|strain\w*|broke|broken|fractur\w*|dislocat\w*|ankle|wrist|knee|shoulder|elbow)\b", re.I)
+# "I don't know" / "haven't measured" = the student doesn't have that information; "skip" / "no thanks" = chose not to say.
+UNKNOWN = re.compile(r"(i\s*)?(don'?t|do not) know|not sure|no idea|didn'?t (measure|check|take)|haven'?t (measured|checked|taken)|not measured|no thermometer|can'?t remember|unsure", re.I)
+DECLINE = re.compile(r"^\s*(no|nope|nah|skip|pass)\b|rather not|prefer not|no thanks|" + UNKNOWN.pattern, re.I)
+TIME_WORDS = re.compile(r"\b(ago|yesterday|today|tonight|morning|afternoon|evening|night|week|weekend|days?|hours?|since|last|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+)\b", re.I)
+ABSENCE = re.compile(r"\b(absence|excuse[ds]?|doctor'?s note|sick note|medical note|note for (class|school|my (professor|instructor|prof))|missed (class|classes|an exam|my exam|lab|a lab)|miss(ing)? (class|classes))\b", re.I)
 APPOINTMENT = re.compile(r"\b(appointment|book|schedule|slot|see (someone|a doctor|a nurse|the doctor)|get seen|find (a )?time|visit)\b", re.I)
 REVIEW = re.compile(r"\b(review|summary|summari[sz]e|what do you know|what have you got|show (me )?my (info|information|details))\b", re.I)
 END = re.compile(r"\b(that'?s (all|it)|that is all|bye|goodbye|end (this|the) (chat|conversation)|i'?m done|we'?re done|nothing else|no,? that'?s it|stop (the )?(chat|conversation))\b", re.I)
@@ -46,7 +51,15 @@ class Turn:
 
 
 def blank() -> dict:
-    return {"state": "GREETING", "turn": 0, "pending": None, "asked": {}, "declined": [], "concerns": [], "last": [], "guidance_given": False, "photo_offered": False}
+    return {"state": "GREETING", "turn": 0, "pending": None, "asked": {}, "declined": [], "unknown": [], "concerns": [], "last": [], "guidance_given": False, "photo_offered": False, "transcript": []}
+
+
+# Structured actions the frontend renders as components (it never parses the assistant's sentences).
+OFFER_TEMPERATURE = "OFFER_TEMPERATURE_INPUT"
+OFFER_PHOTO = "OFFER_PHOTO_UPLOAD"
+ASK_FOLLOW_UP = "ASK_FOLLOW_UP"
+REVIEW_ACTION = "REVIEW_INTAKE"
+SCHEDULING = "FIND_CARE"  # offer scheduling
 
 
 def _h(text: str) -> str:
@@ -59,16 +72,33 @@ def update_concerns(conv: dict, text: str) -> None:
         c.add("fever")
     if VISIBLE.search(text):
         c.add("visible")
-    if SYMPTOM.search(text) or FEVER.search(text) or VISIBLE.search(text):
+    if INJURY.search(text):
+        c.add("injury")
+    if SYMPTOM.search(text) or FEVER.search(text) or VISIBLE.search(text) or INJURY.search(text):
         c.add("symptom")
     conv["concerns"] = sorted(c)
+
+
+def describes_concern(text: str) -> bool:
+    return bool(SYMPTOM.search(text) or FEVER.search(text) or VISIBLE.search(text) or INJURY.search(text))
+
+
+def note_context(conv: dict, text: str) -> None:
+    """Record, in the student's own words, the first concern and any stated reason for a visit. Never inferred."""
+    if describes_concern(text) and not conv.get("chief_concern"):
+        conv["chief_concern"] = text.strip()[:300]
+    if ABSENCE.search(text):
+        conv["absence_requested"] = True
+    if ABSENCE.search(text) or APPOINTMENT.search(text) or re.search(r"\b(check-?up|physical)\b", text, re.I):
+        conv["purpose"] = text.strip()[:300]
 
 
 def record_decline(conv: dict, text: str) -> str | None:
     """If the student declines the pending question, remember it so it's never asked again."""
     pending = conv.get("pending")
     if pending and DECLINE.search(text):
-        conv["declined"] = sorted(set(conv.get("declined", [])) | {pending})
+        bucket = "unknown" if UNKNOWN.search(text) else "declined"
+        conv[bucket] = sorted(set(conv.get(bucket, [])) | {pending})
         conv["pending"] = None
         return pending
     if re.search(r"\b(no|don'?t want|without)\b.*\b(photo|picture|image)\b", text, re.I):
@@ -82,15 +112,21 @@ def record_decline(conv: dict, text: str) -> str | None:
 def next_question(conv: dict, have: set[str], has_photo: bool) -> str | None:
     """Only relevant, unanswered, un-declined questions; each asked at most once."""
     concerns = set(conv.get("concerns", []))
-    done = set(conv.get("declined", [])) | {k for k, n in conv.get("asked", {}).items() if n >= 1}
+    done = set(conv.get("declined", [])) | set(conv.get("unknown", [])) | {k for k, n in conv.get("asked", {}).items() if n >= 1}
     candidates = []
+    if "fever" in concerns and "temperature" not in have:
+        candidates.append("temperature")  # fever: ask about a measurement first
     if "symptom" in concerns and not ({"onset_text", "onset_date"} & have):
         candidates.append("onset_text")
-    if "fever" in concerns and "temperature" not in have:
-        candidates.append("temperature")
     if "visible" in concerns and not has_photo:
         candidates.append("photo")
     return next((k for k in candidates if k not in done), None)
+
+
+def _photo_alongside(conv: dict, has_photo: bool) -> bool:
+    """Something visible was described: offer the optional photo right away, next to the follow-up question."""
+    gone = set(conv.get("declined", [])) | set(conv.get("unknown", [])) | set(k for k, n in conv.get("asked", {}).items() if n >= 1)
+    return "visible" in conv.get("concerns", []) and not has_photo and "photo" not in gone
 
 
 def _ack(updated: list[str], fields: dict[str, str]) -> str:
@@ -114,21 +150,22 @@ def plan(conv: dict, text: str, updated: list[str], fields: dict[str, str], has_
     have = set(fields)
     parts: list[str] = []
     if declined:
-        parts.append(f"No problem — we'll leave out {LABEL.get(declined, 'that')}.")
+        unknown = declined in conv.get("unknown", [])
+        parts.append(f"Okay — I'll note that {'you haven’t measured it' if declined == 'temperature' else 'you’re not sure'}." if unknown else f"No problem — we'll leave out {LABEL.get(declined, 'that')}.")
     ack = _ack(updated, fields)
     if ack:
         parts.append(ack)
     if "temperature_unit_missing" in notes:
         conv["pending"] = "temperature"
-        return Turn(" ".join(parts + ["Was that in °F or °C? I won't guess the unit."]), "CLARIFYING_INFORMATION", ["OPEN_INTAKE_FORM"], {"fields": ["temperature"]}, "temperature")
+        return Turn(" ".join(parts + ["Was that in °F or °C? I won't guess the unit."]), "CLARIFYING_INFORMATION", [OFFER_TEMPERATURE], {"fields": ["temperature"]}, "temperature")
     if "temperature_out_of_range" in notes:
-        return Turn(" ".join(parts + ["That reading looks unusual — could you re-check it? You can also enter it in the form."]), "CLARIFYING_INFORMATION", ["OPEN_INTAKE_FORM"], {"fields": ["temperature"]})
+        return Turn(" ".join(parts + ["That reading looks unusual — could you re-check it? You can also enter it below."]), "CLARIFYING_INFORMATION", [OFFER_TEMPERATURE], {"fields": ["temperature"]})
 
     calendar_actions = [] if has_calendar else ["IMPORT_CALENDAR"]
     if END.search(text):
         conv["pending"] = None
         msg = "Okay — I'll stop here. " + ("Your notes are saved; review them before sharing with your clinician." if have else "You can come back any time.")
-        return Turn(" ".join(parts + [msg]), "COMPLETED", ["REVIEW_INTAKE", "FIND_CARE"] if have else ["FIND_CARE"])
+        return Turn(" ".join(parts + [msg]), "COMPLETED", [REVIEW_ACTION, SCHEDULING] if have else [SCHEDULING])
     if APPOINTMENT.search(text):
         conv["pending"] = None
         msg = "Let's find a time. I'll show demo clinic slots that fit around your classes — you confirm on the next screen." if has_calendar else "Let's find a time. Import your UniTime calendar first so I only suggest slots that don't clash with classes."
@@ -137,7 +174,7 @@ def plan(conv: dict, text: str, updated: list[str], fields: dict[str, str], has_
         return Turn(" ".join(parts + ["Here's what I have so far — check each item before anything is shared."]), "REVIEWING_INTAKE", ["REVIEW_INTAKE"])
     if PHOTO.search(text) and "photo" not in conv.get("declined", []) and not declined:
         conv["photo_offered"] = True
-        return Turn(" ".join(parts + ["Sure — add a photo in the form. It's optional, I'll only describe visible features (never a diagnosis), and you choose whether your clinician sees it."]), "OPTIONAL_CONTEXTUAL_INPUT", ["OFFER_PHOTO"], {"fields": ["photo"]})
+        return Turn(" ".join(parts + ["Sure — add a photo below. It's optional, I'll only describe visible features (never a diagnosis), and you choose whether your clinician sees it."]), "OPTIONAL_CONTEXTUAL_INPUT", [OFFER_PHOTO], {"fields": ["photo"]})
 
     q = next_question(conv, have, has_photo)
     if q:
@@ -147,21 +184,25 @@ def plan(conv: dict, text: str, updated: list[str], fields: dict[str, str], has_
         question = variants[conv["turn"] % len(variants)]
         if q == "photo":
             conv["photo_offered"] = True
-            return Turn(" ".join(parts + [question]), "OPTIONAL_CONTEXTUAL_INPUT", ["OFFER_PHOTO", "FIND_CARE"], {"fields": ["photo"]}, q)
-        form = {"fields": ["temperature"]} if q == "temperature" else None
-        actions = ["OPEN_INTAKE_FORM"] if form else []
-        return Turn(" ".join(parts + [question]), "CLARIFYING_INFORMATION", actions, form, q)
+            return Turn(" ".join(parts + [question]), "OPTIONAL_CONTEXTUAL_INPUT", [OFFER_PHOTO, SCHEDULING], {"fields": ["photo"]}, q)
+        if q == "temperature":
+            return Turn(" ".join(parts + [question]), "CLARIFYING_INFORMATION", [OFFER_TEMPERATURE], {"fields": ["temperature"]}, q)
+        if _photo_alongside(conv, has_photo):
+            conv["asked"]["photo"] = conv["asked"].get("photo", 0) + 1
+            conv["photo_offered"] = True
+            return Turn(" ".join(parts + [question, "If it helps, you can also add a photo below — completely optional."]), "CLARIFYING_INFORMATION", [ASK_FOLLOW_UP, OFFER_PHOTO], {"fields": ["photo"]}, q)
+        return Turn(" ".join(parts + [question]), "CLARIFYING_INFORMATION", [ASK_FOLLOW_UP], None, q)
 
     if "symptom" in conv.get("concerns", []) or have:
         conv["pending"] = None
         if WHAT_NOW.search(text) or THANKS.search(text):
-            return Turn(" ".join(parts + ["From here you can: review what I've noted, find an appointment that fits your classes, add something else, or end the conversation. What would you like?"]), "OFFERING_NEXT_STEPS", ["REVIEW_INTAKE", "FIND_CARE", "ADD_MORE", "END_CONVERSATION", *calendar_actions])
+            return Turn(" ".join(parts + ["From here you can: review what I've noted, find an appointment that fits your classes, add something else, or end the conversation. What would you like?"]), "OFFERING_NEXT_STEPS", [REVIEW_ACTION, SCHEDULING, "ADD_MORE", "END_CONVERSATION", *calendar_actions])
         if not conv.get("guidance_given"):
             conv["guidance_given"] = True
             guidance = "Thanks — that gives your clinician a clear picture. In the meantime, keep an eye on how it changes; if it gets worse or something new and severe appears, contact a clinician sooner, or call 911 in an emergency."
         else:
             guidance = "Anything else you'd like to add, or shall we move on?"
-        return Turn(" ".join(parts + [guidance, "You can review your information, find an appointment, add more, or end here."]), "OFFERING_NEXT_STEPS", ["REVIEW_INTAKE", "FIND_CARE", "ADD_MORE", "END_CONVERSATION", *calendar_actions])
+        return Turn(" ".join(parts + [guidance, "You can review your information, find an appointment, add more, or end here."]), "OFFERING_NEXT_STEPS", [REVIEW_ACTION, SCHEDULING, "ADD_MORE", "END_CONVERSATION", *calendar_actions])
 
     # No concern described yet.
     if WHAT_NOW.search(text):
@@ -185,13 +226,30 @@ def avoid_repeat(conv: dict, text: str, fallback: str) -> str:
 
 def context_for_model(conv: dict, fields: dict[str, str]) -> str:
     known = "; ".join(f"{k}={v}" for k, v in fields.items()) or "nothing yet"
-    return (f"conversation state {conv.get('state')}; already known: {known}; student declined: {', '.join(conv.get('declined', [])) or 'nothing'}; "
-            f"already asked: {', '.join(conv.get('asked', {})) or 'nothing'}. Do NOT ask about anything declined, known or already asked. "
-            "Only ask about temperature if they mention fever; only offer a photo for something visible. If they want an appointment, go straight to it.")
+    return (f"conversation state {conv.get('state')}; already known in THIS conversation: {known}; student declined: {', '.join(conv.get('declined', [])) or 'nothing'}; "
+            f"student doesn't know: {', '.join(conv.get('unknown', [])) or 'nothing'}; already asked: {', '.join(conv.get('asked', {})) or 'nothing'}. "
+            "Do NOT ask about anything declined, unknown, known or already asked. If they want an appointment, go straight to it.")
+
+
+def directive(turn: "Turn") -> str:
+    """Tell Claude which component is on screen under its reply, so its words and the UI always agree."""
+    if OFFER_TEMPERATURE in turn.actions:
+        return ("ON SCREEN under your reply: a temperature entry card (°F/°C, plus 'I haven't measured it' and 'Skip'). "
+                "Ask, in one short sentence, whether they've measured their temperature. Never treat feeling feverish as a measurement.")
+    if OFFER_PHOTO in turn.actions and turn.pending and turn.pending != "photo":
+        q = {"onset_text": "when it started"}.get(turn.pending, turn.pending)
+        return (f"ON SCREEN under your reply: an optional photo upload card. Ask {q}, and mention in a few words that they can add a photo "
+                "below if they want (optional, never a diagnosis).")
+    if OFFER_PHOTO in turn.actions:
+        return "ON SCREEN under your reply: an optional photo upload card. Mention it briefly (optional, never a diagnosis); don't ask for a temperature."
+    if turn.pending == "onset_text":
+        return "Ask when it started, in one short sentence. Do not ask for a temperature or a photo."
+    return "No contextual form is on screen; do not ask for a temperature or a photo. Offer a useful next step (review, appointment, add more) if appropriate."
 
 
 # ---- scheduling intents (clinician + time) ----------------------------------------------------------------
-WHO_AVAILABLE = re.compile(r"\b(which|what|who|any)\b.{0,20}\b(doctors?|clinicians?|providers?|nurses?)\b|\bwho('?s| is) (available|free)\b|\bavailable (doctors?|clinicians?)\b", re.I)
+WHO_AVAILABLE = re.compile(r"\b(which|what|who|any)\b.{0,20}\b(doctors?|clinicians?|providers?|nurses?)\b|\bwho('?s| is) (available|free)\b|\bavailable (doctors?|clinicians?)\b"
+                           r"|\b(show|list|see)\b.{0,15}\b(doctors|clinicians|providers)\b|\ball (the )?(doctors|clinicians|providers)\b", re.I)
 EARLIEST = re.compile(r"\b(earliest|soonest|first available|as soon as possible|asap)\b", re.I)
 NO_PREF = re.compile(r"\b(no preference|don'?t (have a )?preference|anyone is fine|any (doctor|clinician) is fine|doesn'?t matter)\b", re.I)
 SAME_AS_LAST = re.compile(r"\b(same (doctor|clinician|provider)|(saw|seen|see) last time|my (usual|regular) doctor)\b", re.I)
@@ -239,7 +297,9 @@ def scheduling_intent(conv: dict, text: str, clinicians: list[tuple[str, str]], 
     if EARLIEST.search(text):
         sched["sort"], touched = "earliest", True
     # Day / time-of-day words only mean scheduling inside a scheduling context ("since Monday" is an onset).
-    in_context = touched or bool(APPOINTMENT.search(text)) or conv.get("state") == "COORDINATING_APPOINTMENT"
+    # A message describing a symptom is about the symptom, even right after browsing times ("fever since this
+    # morning" must reach the temperature question, not another slot search).
+    in_context = touched or bool(APPOINTMENT.search(text)) or (conv.get("state") == "COORDINATING_APPOINTMENT" and not describes_concern(text))
     if not in_context:
         return None
     low = re.sub(r"\b(since|started|starting|began|from)\s+(last\s+)?\w+", " ", text.lower())

@@ -151,6 +151,11 @@ class Appointment(Base):
     confirmation_mode: Mapped[str] = mapped_column(String, default="demo")
     idempotency_key: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Booking context. purpose = the student's own stated reason (never inferred symptoms); an absence request
+    # is only a request, never an approval. The case (Encounter) links appointment, clinician and summaries.
+    intake_session_id: Mapped[str | None] = mapped_column(ForeignKey("intake_sessions.id"), nullable=True)
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    absence_requested: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class Encounter(Base):
@@ -195,15 +200,21 @@ class IntakeSession(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    status: Mapped[str] = mapped_column(String, default="OPEN")  # OPEN | SHARED | WITHDRAWN | CLOSED
+    status: Mapped[str] = mapped_column(String, default="OPEN")  # OPEN | CLOSED (legacy rows may say SHARED)
     safety_state: Mapped[str] = mapped_column(String, default="GENERAL_SUPPORT")
     voice_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     transcription_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     photo_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     skipped_fields: Mapped[list] = mapped_column(JSON, default=list)
-    conversation: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # dialog state (services/dialog.py); no transcript
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Dialog state (services/dialog.py) plus the on-screen message list for this conversation, so reopening shows
+    # what was actually said instead of silently continuing. Never shared with clinicians; no audio is stored.
+    conversation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)  # conversation start (UTC)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    chief_concern: Mapped[str | None] = mapped_column(Text, nullable=True)  # the student's first description, verbatim
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)  # student's stated reason for an appointment, verbatim
+    absence_requested: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # student asked about absence documentation
 
 
 class IntakeField(Base):
@@ -221,16 +232,23 @@ class IntakeField(Base):
 
 
 class HandoffPacket(Base):
-    """Immutable snapshot the student authorized for their assigned clinician."""
+    """AI-assisted pre-visit summary: an immutable, versioned snapshot of ONE conversation session that the
+    student reviewed and authorized. Versions are per session (v1, v2 … after corrections); older versions are
+    kept as SUPERSEDED, never edited. encounter_id is empty until the student has an appointment: approving
+    before booking is allowed, and booking attaches it. The clinician's access follows the encounter's
+    assigned clinician, so a legitimate reassignment moves access with it (audited)."""
 
     __tablename__ = "handoff_packets"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    encounter_id: Mapped[str] = mapped_column(ForeignKey("encounters.id", ondelete="CASCADE"))
+    encounter_id: Mapped[str | None] = mapped_column(ForeignKey("encounters.id", ondelete="CASCADE"), nullable=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("intake_sessions.id"))
+    student_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     field_snapshot: Mapped[list] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String, default="SHARED")  # SHARED | WITHDRAWN
+    summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # structured pre-visit summary (services/previsit.py)
+    consent_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # exactly what the student agreed to
+    status: Mapped[str] = mapped_column(String, default="SHARED")  # SHARED | SUPERSEDED | WITHDRAWN
     student_approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     clinician_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

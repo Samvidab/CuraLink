@@ -84,7 +84,7 @@ def test_sdk_request_shape_and_tool_loop(fake_api):
 
 def test_end_to_end_through_api_with_sdk(fake_api, student):
     r = student.post("/api/v1/intake/messages", json={"message": "scratchy throat, 38.2 C", "history": []}).json()
-    assert r["mode"] == "claude" and r["next_actions"][0] == "FIND_CARE"
+    assert r["mode"] == "claude" and "FIND_CARE" in r["next_actions"]
     assert set(r["field_updates"]) == {"temperature", "symptoms_free_text"}
     blocked = [t for t in r["tool_events"] if t["status"] == "rejected"]
     assert blocked and blocked[0]["tool"] == "send_email"

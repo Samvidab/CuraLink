@@ -195,15 +195,22 @@ def test_handoff_requires_confirmation_and_is_scoped(student, clinician, login):
     assert student.post(f"/api/v1/handoffs/{pkt['packet_id']}/withdraw").json()["status"] == "WITHDRAWN"
     assert clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/intake").json() == {
         "encounter_id": enc["id"], "status": "WITHDRAWN", "packet_id": pkt["packet_id"], "version": 1, "shared_at": None, "fields": [], "consent": {},
-        "attachments": [], "annotations": {},
+        "attachments": [], "annotations": {}, "summary": None, "session": None, "consent_text": None,
     }
 
 
-def test_shared_session_is_closed_to_edits(student):
+def test_corrections_after_sharing_become_a_new_version(student, clinician):
     enc = _book(student)
     sid = _snap(student)["session_id"]
     student.patch(f"/api/v1/intake/sessions/{sid}/fields", json={"fields": [{"key": "symptoms_free_text", "value": {"text": "cough"}}]})
-    student.post(f"/api/v1/encounters/{enc['id']}/handoff", json={"student_authorized": True, "field_keys": ["symptoms_free_text"]})
-    r = student.patch(f"/api/v1/intake/sessions/{sid}/fields", json={"fields": [{"key": "requests", "value": {"text": "x"}}]})
-    assert r.status_code == 409
-    assert _snap(student)["session_id"] != sid  # a fresh session starts for new details
+    v1 = student.post(f"/api/v1/encounters/{enc['id']}/handoff", json={"student_authorized": True, "field_keys": ["symptoms_free_text"]}).json()
+    student.patch(f"/api/v1/intake/sessions/{sid}/fields", json={"fields": [{"key": "symptoms_free_text", "value": {"text": "dry cough"}}]})
+    # The submitted snapshot is immutable: the clinician still sees v1 until the student re-approves.
+    assert clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/intake").json()["fields"][0]["display"] == "cough"
+    v2 = student.post(f"/api/v1/intake/sessions/{sid}/summary", json={"student_authorized": True, "field_keys": ["symptoms_free_text"]}).json()
+    assert (v1["version"], v2["version"], v2["encounter_id"]) == (1, 2, enc["id"])
+    view = clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/intake").json()
+    assert view["version"] == 2 and view["fields"][0]["display"] == "dry cough"
+    hist = clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/previsit-history").json()
+    assert [v["status"] for v in hist["groups"][0]["sessions"][0]["versions"]] == ["SUPERSEDED", "SHARED"]
+    assert _snap(student)["session_id"] == sid  # sharing doesn't end the conversation

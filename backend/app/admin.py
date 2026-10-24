@@ -1,6 +1,7 @@
 """Server-side administration (operators only; never exposed over HTTP).
 
     uv run python -m app.admin verify-clinician doctor@clinic.example.com
+    uv run python -m app.admin seed-availability     # add MISSING demo clinician hours; resets nothing
 
 Verification is the ONLY way a clinician account gains clinician access.
 """
@@ -17,6 +18,16 @@ from app.services import audit
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["seed-availability"]:
+        from app.services.availability import ensure_demo_data
+
+        dbmod.create_all()
+        gen = dbmod.get_db()
+        try:
+            print(ensure_demo_data(next(gen)))
+            return 0
+        finally:
+            gen.close()
     if len(argv) != 2 or argv[0] != "verify-clinician":
         print(__doc__)
         return 2

@@ -134,6 +134,13 @@ cd frontend && npx tsc --noEmit -p . && npx -y pnpm@10.34.3 build
 ./run_demo.sh e2e                                            # Playwright on the isolated stack
 ```
 
+## Database upgrades (existing demo data is preserved)
+
+On startup (`backend/app/db.py::create_all`, `app/main.py::_ensure_seeded`):
+1. New tables are created and new columns are added as nullable. No column is ever dropped or rewritten.
+2. `handoff_packets.encounter_id` becomes nullable once, through a table rebuild: the rows are copied, foreign keys keep their names, and a backup is written first to `backend/curalink_demo.backup-<timestamp>.db`. On later starts this step does nothing.
+3. Older demo databases get only what is missing: names on the demo accounts, demo clinician profiles, hours and exceptions for clinicians without a profile, and `clinician_id`/`appointment_type` on older appointments (copied from their booked slot). Calendars, appointments, conversations and cases are never reset. To run it by hand: `cd backend && uv run python -m app.admin seed-availability`.
+
 ## Troubleshooting
 
 - **Port already in use:** run `./run_demo.sh status`. A healthy CuraLink is reused. Otherwise use `API_PORT=8001 WEB_PORT=8444 ./run_demo.sh`.
