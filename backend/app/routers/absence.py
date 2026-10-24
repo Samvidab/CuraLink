@@ -24,8 +24,9 @@ from app.models import (
 from app.routers.clinician import assigned_encounter
 from app.routers.system import _demo_only
 from app.security import current_user, require_clinician, require_student, verify_password
+from app import curalink_config as cfg
 from app.services import absence_service as svc
-from app.services import audit
+from app.services import audit, signature_vault
 from app.timeutil import to_local, utcnow
 
 router = APIRouter(prefix="/api/v1", tags=["absence"])
@@ -39,7 +40,8 @@ STATUS_LABELS = {
     "DELIVERY_QUEUED": "Sending to test inbox",
     "SENT": "Delivered to test inbox",
     "FAILED": "Delivery failed — retry available",
-    "REJECTED": "Clinician declined to document",
+    "REJECTED": "No medical absence certificate indicated",
+    "DEFERRED": "Determination deferred pending further evaluation",
     "REVOKED": "Consent withdrawn — nothing sent",
 }
 
@@ -65,7 +67,9 @@ class ContactIn(BaseModel):
 
 
 class DecisionIn(BaseModel):
-    decision: Literal["CERTIFY", "DECLINE"]
+    # CERTIFY = approve an absence period (clinician picks dates); DECLINE = no medical absence certificate
+    # indicated; DEFER = pending further evaluation. There is no AI- or illness-derived default duration.
+    decision: Literal["CERTIFY", "DECLINE", "DEFER"]
     start_date: date | None = None
     end_date: date | None = None
     wording: str | None = Field(None, max_length=2000)
@@ -140,7 +144,7 @@ def student_case_out(db: Session, case: AbsenceCase) -> dict:
     d = svc.latest_decision(db, case.id)
     v = svc.latest_version(db, case.id)
     return {
-        "id": case.id, "status": case.status, "status_label": STATUS_LABELS.get(case.status, case.status),
+        "id": case.id, "status": case.status, "status_label": STATUS_LABELS.get(case.status, case.status), "origin": case.origin or "student",
         "encounter_id": enc.id, "visit_type": enc.visit_type, "appointment_at": to_local(enc.starts_at, student.timezone), "clinician_name": doc.display_name,
         "requested_start": case.requested_start, "requested_end": case.requested_end,
         "disclosure_consent": case.disclosure_consent and case.consent_revoked_at is None, "consent_revoked_at": case.consent_revoked_at,
@@ -163,13 +167,14 @@ def clinician_case_out(db: Session, case: AbsenceCase, clinician: User) -> dict:
         impact = _impact_out(imp, svc.recipients(db, student.id, imp))
     asset = svc.active_signature(db, clinician.id)
     return {
-        "id": case.id, "status": case.status, "status_label": STATUS_LABELS.get(case.status, case.status),
+        "id": case.id, "status": case.status, "status_label": STATUS_LABELS.get(case.status, case.status), "origin": case.origin or "student",
         "encounter_id": enc.id, "visit_type": enc.visit_type, "appointment_at": to_local(enc.starts_at, clinician.timezone),
         "student_name": student.display_name, "requested_start": case.requested_start, "requested_end": case.requested_end,
         "student_note": case.student_note,
         "decision": {"decision": d.decision, "start_date": d.start_date, "end_date": d.end_date, "wording": d.wording, "rationale_private": d.rationale_private, "version": d.version} if d else None,
         "impact": impact, "document": _version_out(v, include_content=True),
         "signature_asset": {"id": asset.id, "kind": asset.kind, "created_at": asset.created_at} if asset else None,
+        "clinic": cfg.clinic_profile(),
         "gates": {
             "student_consent": case.disclosure_consent and case.consent_revoked_at is None,
             "signed": bool(v and v.state == "SIGNED"),
@@ -234,6 +239,10 @@ def set_disclosure_consent(case_id: str, body: ConsentIn, user: User = Depends(r
     return student_case_out(db, case)
 
 
+# CURALINK_CONFIG: INSTRUCTOR_EMAIL_FALLBACK
+# Manual instructor-contact entry when no reliable match exists (UniTime file, catalog or directory).
+# UI: Settings -> Courses & instructors, and My Cases -> "Contact needed". Requires the student to confirm they
+# copied the address from an official source; result is STUDENT_CONFIRMED and still must pass the test allowlist.
 @router.patch("/courses/{course_id}/contact")
 def correct_contact(course_id: str, body: ContactIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
     """Manual correction (PRD US-05). Never synthesized; the student confirms the address they typed."""
@@ -266,6 +275,21 @@ def _version(db: Session, clinician: User, version_id: str) -> tuple[AbsenceCase
     if v is None:
         raise ApiError(403, "FORBIDDEN", "You don't have access to this document.", recoverable=False)
     return _clin_case(db, clinician, v.case_id), v
+
+
+@router.post("/clinician/encounters/{encounter_id}/absence-case")
+def open_case_for_encounter(encounter_id: str, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> dict:
+    """After the visit, the treating clinician may open a determination even if the student didn't request one.
+    The student must still give disclosure consent before anything is sent."""
+    enc = assigned_encounter(db, user, encounter_id)
+    case = db.scalar(select(AbsenceCase).where(AbsenceCase.encounter_id == enc.id).order_by(AbsenceCase.created_at.desc()))
+    if case is None:
+        d = to_local(enc.starts_at, user.timezone).date()
+        case = AbsenceCase(id=f"case_{uuid4().hex[:8]}", student_id=enc.student_id, encounter_id=enc.id, requested_start=d, requested_end=d, origin="clinician", status="CLINICIAN_REVIEW")
+        db.add(case)
+        audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="CASE_OPENED", object_type="absence_case", object_id=case.id, to_state="CLINICIAN_REVIEW", detail="clinician-initiated")
+        db.commit()
+    return clinician_case_out(db, case, user)
 
 
 @router.get("/clinician/absence-cases")
@@ -309,7 +333,7 @@ def decide(case_id: str, body: DecisionIn, user: User = Depends(require_clinicia
     if v and v.state in ("UNSIGNED", "SIGNED"):
         v.state = "SUPERSEDED"  # changed dates void any existing document/approval
     old = case.status
-    case.status = "DATES_SET" if body.decision == "CERTIFY" else "REJECTED"
+    case.status = {"CERTIFY": "DATES_SET", "DECLINE": "REJECTED", "DEFER": "DEFERRED"}[body.decision]
     audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=case.student_id, action="ABSENCE_DECISION", object_type="absence_case", object_id=case.id, from_state=old, to_state=case.status, detail=f"{body.decision} {body.start_date or ''}..{body.end_date or ''}")
     db.commit()
     return clinician_case_out(db, case, user)
@@ -393,6 +417,48 @@ def enroll_asset(user: User = Depends(require_clinician), db: Session = Depends(
     audit.record(db, actor_role="clinician", actor_id=user.id, action="SIGNATURE_ENROLLED", object_type="signature_asset", object_id=a.id, detail="demo_sample")
     db.commit()
     return {"id": a.id, "kind": a.kind, "created_at": a.created_at, "revoked_at": None}
+
+
+class DrawnSignatureIn(BaseModel):
+    png_base64: str = Field(min_length=100, max_length=450_000)
+
+
+@router.post("/clinician/signature-assets/drawn")
+def enroll_drawn(body: DrawnSignatureIn, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> dict:
+    """Save (or replace) the clinician's hand-drawn signature, encrypted at rest. Saving never signs anything."""
+    import base64
+    import binascii
+
+    try:
+        raw = base64.b64decode(body.png_base64.split(",", 1)[-1], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ApiError(422, "INVALID_SIGNATURE_IMAGE", "Draw your signature again.") from exc
+    png = signature_vault.validate_png(raw)
+    for old in db.scalars(select(SignatureAsset).where(SignatureAsset.clinician_id == user.id, SignatureAsset.revoked_at.is_(None))).all():
+        old.revoked_at = utcnow()
+    a = SignatureAsset(id=f"sig_{uuid4().hex[:8]}", clinician_id=user.id, kind="drawn", encrypted_blob=signature_vault.encrypt(png, user.id), mime_type="image/png")
+    db.add(a)
+    audit.record(db, actor_role="clinician", actor_id=user.id, action="SIGNATURE_ENROLLED", object_type="signature_asset", object_id=a.id, detail="drawn (encrypted)")
+    db.commit()
+    return {"id": a.id, "kind": a.kind, "created_at": a.created_at, "revoked_at": None}
+
+
+@router.get("/clinician/signature-assets/{asset_id}/preview")
+def preview_asset(asset_id: str, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> Response:
+    a = db.get(SignatureAsset, asset_id)
+    if a is None or a.clinician_id != user.id or a.kind != "drawn" or not a.encrypted_blob:
+        raise ApiError(404, "NOT_FOUND", "Signature not found.")
+    return Response(signature_vault.decrypt(a.encrypted_blob, user.id), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/verify/{verification_id}")
+def verify(verification_id: str, db: Session = Depends(get_db)) -> dict:
+    """DEMO verification record. Deliberately minimal: no student, clinician or course names."""
+    for v in db.scalars(select(DocumentVersion).where(DocumentVersion.state.in_(("SIGNED", "SUPERSEDED", "UNSIGNED")))).all():
+        if v.content.get("verification_id") == verification_id:
+            return {"found": True, "demo": True, "state": v.state, "issue_date": v.content.get("issue_date"), "clinic_name": v.content.get("clinic_name"),
+                    "signed_sha256_prefix": (v.signed_sha256 or "")[:16], "note": "Demonstration record only; not an official authenticity service."}
+    return {"found": False, "demo": True, "note": "No demo record with this identifier."}
 
 
 @router.delete("/clinician/signature-assets/{asset_id}", status_code=204)

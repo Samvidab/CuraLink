@@ -93,6 +93,38 @@ def get_current(user: User = Depends(require_student), db: Session = Depends(get
     return snapshot(db, intake_service.current_session(db, user))
 
 
+AI_GENERATED = {"photo_observation"}
+
+
+@router.get("/intake/sessions/current/summary")
+def summary(user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
+    """Structured intake summary, attributed by source. Built deterministically from stored fields
+    (no model call), so it can't add anything the student didn't say or confirm."""
+    sess = intake_service.current_session(db, user)
+    fields = sorted(intake_service.fields_of(db, sess).values(), key=lambda f: FIELD_KEYS.index(f.key))
+
+    def item(f: IntakeField) -> dict:
+        return {"key": f.key, "label": LABELS[f.key], "display": display(f.key, f.value), "source": f.provenance, "confirmed": f.confirmed_by_student}
+
+    sections = {
+        "symptoms": [item(f) for f in fields if f.key == "symptoms_free_text"],
+        "onset": [item(f) for f in fields if f.key in ("onset_text", "onset_date")],
+        "temperature": [item(f) for f in fields if f.key == "temperature"],
+        "additional": [item(f) for f in fields if f.key in ("appointment_preference", "accessibility_needs", "requests")],
+        "image_observations": [item(f) for f in fields if f.provenance in AI_GENERATED],
+    }
+    return {
+        "session_id": sess.id,
+        "student_reported": {k: v for k, v in sections.items() if k != "image_observations"},
+        "ai_generated": sections["image_observations"],
+        "clinician_verified": [],  # filled only by the clinician after the visit, never by the AI
+        "missing": [{"key": k, "label": LABELS[k]} for k in intake_service.missing(db, sess)],
+        "uncertain": [{"key": f.key, "label": LABELS[f.key], "reason": "Not yet confirmed by you"} for f in fields if not f.confirmed_by_student],
+        "skipped": list(sess.skipped_fields or []),
+        "disclaimer": "Organized from what you said, entered or uploaded. Not a diagnosis; your clinician decides about any absence.",
+    }
+
+
 @router.post("/intake/sessions/new", response_model=IntakeSnapshot)
 def new_session(user: User = Depends(require_student), db: Session = Depends(get_db)) -> IntakeSnapshot:
     old = intake_service.current_session(db, user, create=False)

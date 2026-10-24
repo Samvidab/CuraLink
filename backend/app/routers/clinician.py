@@ -9,7 +9,8 @@ from app import serializers as ser
 from app.config import get_settings
 from app.db import get_db
 from app.errors import ApiError
-from app.models import AbsenceCase, Attachment, AuditEvent, Encounter, HandoffPacket, IntakeAnnotation, IntakeSession, User
+from app import curalink_config as cfg
+from app.models import AbsenceCase, Attachment, AuditEvent, ClinicalEvaluation, Encounter, HandoffPacket, IntakeAnnotation, IntakeSession, User
 from app.schemas import ActivityOut, ClinicianDashboard, ClinicianIntakeOut, EncounterDetail, EncounterRow, IntakeFieldOut
 from app.security import require_clinician
 from app.services import audit
@@ -161,3 +162,34 @@ def annotate(encounter_id: str, body: AnnotationIn, user: User = Depends(require
     audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="INTAKE_FIELD_REVIEWED", object_type="encounter", object_id=enc.id, detail=f"{body.field_key}: {body.decision}")
     db.commit()
     return {"field_key": body.field_key, "decision": body.decision}
+
+
+class EvaluationIn(BaseModel):
+    values: dict[str, str] = Field(default_factory=dict)
+
+
+@router.get("/encounters/{encounter_id}/evaluation")
+def get_evaluation(encounter_id: str, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> dict:
+    enc = assigned_encounter(db, user, encounter_id)
+    ev = db.scalar(select(ClinicalEvaluation).where(ClinicalEvaluation.encounter_id == enc.id))
+    return {"fields": cfg.EXAMINATION_FIELDS, "values": ev.values if ev else {}, "updated_at": ev.updated_at if ev else None}
+
+
+@router.put("/encounters/{encounter_id}/evaluation")
+def put_evaluation(encounter_id: str, body: EvaluationIn, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> dict:
+    """Clinician-entered findings. Only the assigned, verified clinician; content never logged or sent to professors."""
+    enc = assigned_encounter(db, user, encounter_id)
+    allowed = {f["key"] for f in cfg.EXAMINATION_FIELDS}
+    unknown = set(body.values) - allowed
+    if unknown:
+        raise ApiError(422, "UNKNOWN_FIELD", f"Unknown examination field(s): {', '.join(sorted(unknown))}.")
+    ev = db.scalar(select(ClinicalEvaluation).where(ClinicalEvaluation.encounter_id == enc.id))
+    clean = {k: v.strip()[:4000] for k, v in body.values.items()}
+    if ev is None:
+        ev = ClinicalEvaluation(id=f"eval_{uuid4().hex[:8]}", encounter_id=enc.id, clinician_id=user.id, values=clean)
+        db.add(ev)
+    else:
+        ev.values, ev.updated_at, ev.clinician_id = {**ev.values, **clean}, utcnow(), user.id
+    audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="EVALUATION_SAVED", object_type="encounter", object_id=enc.id, detail=f"{len(clean)} fields")
+    db.commit()
+    return {"fields": cfg.EXAMINATION_FIELDS, "values": ev.values, "updated_at": ev.updated_at}

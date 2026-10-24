@@ -6,6 +6,11 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
+# CURALINK_CONFIG: INTAKE_FIELDS
+# Student intake questions/fields. To add one: add its key here, a label in LABELS, validation in validate()
+# if it isn't free text, and (optionally) list it in REQUESTED_FOR_HANDOFF so the assistant asks for it.
+# The model's propose_intake_fields tool (llm_gateway.py) picks up the key list automatically.
+# There is deliberately NO field for absence duration: only the clinician sets dates.
 FIELD_KEYS = (
     "symptoms_free_text",
     "onset_text",

@@ -9,6 +9,7 @@ gates pass, and only to a test inbox in demo mode.
 import hashlib
 import json
 import secrets
+from zoneinfo import ZoneInfo
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from app.errors import ApiError
 from app.models import (
     AbsenceCase,
     CalendarEvent,
+    Encounter,
     ClinicianAbsenceDecision,
     Course,
     Delivery,
@@ -30,15 +32,12 @@ from app.models import (
     TestInboxMessage,
     User,
 )
-from app.services import audit, pdf_builder
+from app import curalink_config as cfg
+from app.services import audit, pdf_builder, signature_vault
 from app.services.absence_mapper import Impact, Meeting, impacted
 from app.timeutil import as_utc, utcnow
 
 DELIVERABLE_CONTACT = {"VERIFIED", "STUDENT_CONFIRMED"}
-DEFAULT_WORDING = (
-    "{student} has been seen by a healthcare professional and may be unable to attend class from {start} through {end}. "
-    "This notice does not include medical details and does not determine whether an absence is excused."
-)
 
 
 # ---- impact & recipients ------------------------------------------------------
@@ -83,21 +82,19 @@ def recipients(db: Session, student_id: str, impact: Impact) -> list[dict]:
     return out
 
 
+def _fill(template: str, values: dict) -> str:
+    for k, v in values.items():
+        template = template.replace("{" + k + "}", str(v))
+    return template
+
+
 def draft_message(student_name: str, clinician_name: str, r: dict, start: str, end: str) -> dict:
-    """Minimal disclosure: no symptoms, no diagnosis, no intake details (AT-11)."""
-    who = r["instructor_name"] or "Instructor"
-    dates = ", ".join(r["dates"])
-    return {
-        "subject": f"Attendance verification: {student_name} · {r['course_code']}",
-        "body": (
-            f"Dear {who},\n\n"
-            f"{student_name} was seen by a healthcare professional and may be absent from {r['course_code']} "
-            f"on {dates} (verification period {start} to {end}).\n\n"
-            "This message contains no medical information and does not determine whether the absence is excused; "
-            "please apply your course and university policies.\n\n"
-            f"Sent on behalf of {clinician_name} via CuraLink (demo). The signed verification is attached."
-        ),
+    """Minimal disclosure: no symptoms, no diagnosis, no intake details (AT-11). Template: NOTIFICATION_TEMPLATES."""
+    values = {
+        "instructor": r["instructor_name"] or "Instructor", "student": student_name, "course": r["course_code"],
+        "dates": ", ".join(r["dates"]), "start": start, "end": end, "clinician": clinician_name, "clinic": cfg.clinic_profile()["name"],
     }
+    return {"subject": _fill(cfg.NOTIFICATION_TEMPLATES["subject"], values), "body": _fill(cfg.NOTIFICATION_TEMPLATES["body"], values)}
 
 
 # ---- versions -----------------------------------------------------------------
@@ -119,7 +116,7 @@ def render_version(db: Session, case: AbsenceCase, clinician: User, wording: str
     recips = recipients(db, student.id, impact)
     excluded = set(excluded or [])
     start, end = decision.start_date.isoformat(), decision.end_date.isoformat()
-    template = (wording or decision.wording or DEFAULT_WORDING)[:2000]
+    template = (wording or decision.wording or cfg.CERTIFICATE_LANGUAGE["default_statement"])[:2000]
     final_wording = template.replace("{student}", student.display_name).replace("{start}", start).replace("{end}", end)
     messages = []
     for r in recips:
@@ -129,12 +126,25 @@ def render_version(db: Session, case: AbsenceCase, clinician: User, wording: str
         messages.append({**r, **m, "include": r["course_code"] not in excluded})
     prev = latest_version(db, case.id)
     version_no = (prev.version + 1) if prev else 1
+    enc = db.get(Encounter, case.encounter_id)
+    clinic = cfg.clinic_profile()
     content = {
         "case_id": case.id, "version": version_no, "student_name": student.display_name, "clinician_name": clinician.display_name,
+        "clinician_credentials": clinician.credentials or "", "clinic_name": clinic["name"],
+        "clinic_contact": f"{clinic['address']} · {clinic['phone']} · {clinic['email']}",
+        "appointment_date": as_utc(enc.starts_at).astimezone(ZoneInfo(student.timezone)).date().isoformat() if enc else "",
+        "issue_date": utcnow().date().isoformat(),
+        # CURALINK_CONFIG: DOCUMENT_VERIFICATION
+        # Demo verification reference (random, unguessable). GET /api/v1/verify/{id} returns a minimal DEMO record.
+        # TODO(CURALINK-MANUAL): a real authenticity service (e.g. signed QR + clinic-hosted verifier) for production.
+        "verification_id": f"CLV-DEMO-{secrets.token_hex(4).upper()}-{version_no}",
         "start_date": start, "end_date": end, "wording": final_wording,
         "courses": [{"code": r["course_code"], "dates": r["dates"]} for r in recips],
         "days": impact.days, "messages": messages,
     }
+    missing_fields = [f for f in cfg.ABSENCE_CERTIFICATION_FIELDS if not str(content.get(f) or "").strip()]
+    if missing_fields:
+        raise ApiError(422, "CERTIFICATE_INCOMPLETE", f"Certificate fields missing: {', '.join(missing_fields)}.", details={"fields": missing_fields})
     pdf = pdf_builder.render(content)
     if prev and prev.state in ("UNSIGNED", "SIGNED"):
         prev.state = "SUPERSEDED"  # any edit invalidates the earlier version and its approval
@@ -166,6 +176,10 @@ def issue_nonce(db: Session, clinician: User, version: DocumentVersion) -> SignN
     return n
 
 
+# CURALINK_CONFIG: SIGNING_POLICY
+# Enforced here and in POST /clinician/documents/{id}/approve-sign (re-authentication). A signature is applied
+# only to the LATEST UNSIGNED version, with a matching document hash, a fresh single-use nonce, the exact
+# recipient list shown in the preview, and an active signature asset. Any later edit creates a new unsigned version.
 def sign(db: Session, case: AbsenceCase, version: DocumentVersion, clinician: User, nonce: str, document_sha256: str, recipient_codes: list[str]) -> SignAuthorization:
     latest = latest_version(db, case.id)
     if latest is None or latest.id != version.id or version.state != "UNSIGNED":
@@ -188,9 +202,10 @@ def sign(db: Session, case: AbsenceCase, version: DocumentVersion, clinician: Us
     )
     db.add(auth)
     signed_at = utcnow()
+    drawn = signature_vault.decrypt(asset.encrypted_blob, clinician.id) if asset.kind == "drawn" and asset.encrypted_blob else None
     signed = pdf_builder.render(version.content, {
         "signed_at": signed_at.strftime("%Y-%m-%d %H:%M"), "clinician_name": clinician.display_name, "credentials": clinician.credentials,
-        "unsigned_sha256": version.unsigned_sha256, "authorization_id": auth.id,
+        "unsigned_sha256": version.unsigned_sha256, "authorization_id": auth.id, "image_png": drawn,
     })
     version.signed_pdf, version.signed_sha256, version.state, version.signed_at = signed, pdf_builder.sha256(signed), "SIGNED", signed_at
     old = case.status
@@ -200,6 +215,18 @@ def sign(db: Session, case: AbsenceCase, version: DocumentVersion, clinician: Us
 
 
 # ---- delivery (transactional outbox, test transport) ------------------------
+
+# CURALINK_CONFIG: EMAIL_PROVIDER
+# The only implemented transport is the local test inbox below. A future provider (e.g. Microsoft Graph or an SMTP
+# relay approved by the clinic) must implement send(db, delivery, subject, body, attachment_sha) and be selected in
+# transport(). TODO(CURALINK-MANUAL): authorized production email provider + credentials (env vars, never source).
+def transport():
+    # CURALINK_CONFIG: EMAIL_DELIVERY_MODE  ("test_inbox" only; anything else refuses to send)
+    mode = get_settings().email_delivery_mode
+    if mode != "test_inbox":
+        raise ApiError(503, "DELIVERY_PROVIDER_NOT_CONFIGURED", f"Delivery mode '{mode}' is not implemented. Nothing was sent.", recoverable=False)
+    return TestInboxTransport
+
 
 class TestInboxTransport:
     """Demo transport: writes to the local test inbox. `fail_next` simulates an outage (AT-14)."""
@@ -217,6 +244,10 @@ class TestInboxTransport:
         return msg.id
 
 
+# CURALINK_CONFIG: DOCUMENT_RECIPIENT_RULES
+# Every send requires ALL of: student disclosure consent (re-checked at send time), the latest SIGNED version with
+# an intact hash, recipients unchanged since signing, and each recipient VERIFIED/STUDENT_CONFIRMED and inside
+# TEST_EMAIL_ALLOWLIST. No configuration flag disables these checks.
 def check_delivery_gates(db: Session, case: AbsenceCase, version: DocumentVersion) -> SignAuthorization:
     if not case.disclosure_consent or case.consent_revoked_at is not None:
         raise ApiError(409, "STUDENT_CONSENT_MISSING", "The student hasn't consented to sending (or withdrew consent). Nothing will be sent.")
@@ -236,6 +267,7 @@ def check_delivery_gates(db: Session, case: AbsenceCase, version: DocumentVersio
 
 def deliver(db: Session, case: AbsenceCase, version: DocumentVersion, actor: User, idempotency_key: str) -> list[Delivery]:
     auth = check_delivery_gates(db, case, version)
+    transport()  # refuse up front if no supported delivery mode is configured
     out: list[Delivery] = []
     for dest in auth.approved_destinations:
         # Idempotent per (version, destination): repeats return the existing row.
@@ -265,7 +297,7 @@ def process(db: Session, case: AbsenceCase, version: DocumentVersion) -> None:
         d.attempts += 1
         m = messages[d.course_code]
         try:
-            d.receipt_id = TestInboxTransport.send(db, d, m["subject"], m["body"], version.signed_sha256 or "")
+            d.receipt_id = transport().send(db, d, m["subject"], m["body"], version.signed_sha256 or "")
             d.state, d.sent_at, d.error_code = "SENT", utcnow(), None
         except RuntimeError as exc:
             d.state, d.error_code = "FAILED", str(exc)

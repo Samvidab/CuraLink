@@ -6,6 +6,9 @@ import { api, ApiError } from '../lib/api'
 import { fmtDay, fmtTime } from '../lib/format'
 import type { Handoff, IntakeSnapshot, PhotoAttachment, Provenance, StudentEncounter } from '../lib/types'
 
+type SummaryItem = { key: string; label: string; display: string; source: string; confirmed: boolean }
+type IntakeSummary = { student_reported: Record<string, SummaryItem[]>; ai_generated: SummaryItem[]; missing: { key: string; label: string }[]; uncertain: { key: string; label: string }[]; disclaimer: string }
+
 export const PROVENANCE: Record<Provenance, string> = { voice: 'Spoken', text: 'Typed in chat', form: 'Entered', photo_observation: 'Image observation', clinician: 'Clinician' }
 const NEEDS: Record<string, string> = { symptoms_free_text: 'what you’re experiencing', onset_text: 'when it started', temperature: 'temperature' }
 
@@ -117,6 +120,7 @@ export function HandoffDialog({ snap, onClose }: { snap: IntakeSnapshot; onClose
   const confirmed = snap.fields.filter(f => f.confirmed_by_student)
   const [keys, setKeys] = useState<string[]>(confirmed.map(f => f.key))
   const photos = usePhotos()
+  const summary = useQuery({ queryKey: ['intake-summary', snap.session_id, snap.fields.length], queryFn: () => api.get<IntakeSummary>('/intake/sessions/current/summary') })
   const [photoIds, setPhotoIds] = useState<string[]>([]) // default: photos are NOT shared
   const [encId, setEncId] = useState<string>('')
   const [authorized, setAuthorized] = useState(false)
@@ -133,6 +137,12 @@ export function HandoffDialog({ snap, onClose }: { snap: IntakeSnapshot; onClose
     :<><h2 id="handoff-title" className="text-xl font-semibold">Review what will be sent to your clinician</h2>
       {encounters.isLoading?<p className="mt-4 text-sm text-slate-500">Loading…</p>:!target?<p className="mt-4 rounded-xl bg-slate-50 p-4 text-sm text-slate-600">You need a demo appointment first, so CuraLink knows which clinician to share with. <Link to="/student/appointments" className="font-semibold text-teal-700 underline" onClick={onClose}>Find an appointment</Link></p>:<>
       {upcoming.length>1?<label className="mt-4 block text-sm font-semibold">Appointment<select className="input mt-2" value={target.id} onChange={e=>setEncId(e.target.value)}>{upcoming.map(e=><option key={e.id} value={e.id}>{e.visit_type} · {fmtDay(e.starts_at)} {fmtTime(e.starts_at)} · {e.clinician_name}</option>)}</select></label>:<p className="mt-3 text-sm text-slate-600">For your <b>{target.visit_type.toLowerCase()}</b> on {fmtDay(target.starts_at)} at {fmtTime(target.starts_at)} with <b>{target.clinician_name}</b> <span className="text-xs">(fictional)</span>.</p>}
+      {summary.data&&<div className="mt-4 rounded-xl border border-slate-200 p-3 text-xs leading-5"><p className="font-semibold text-slate-700">Intake summary</p>
+        <p className="mt-1"><b>Reported by you:</b> {Object.values(summary.data.student_reported).flat().map(i=>`${i.label}: ${i.display}`).join(' · ')||'nothing yet'}</p>
+        <p className="mt-1"><b>AI-generated (non-diagnostic):</b> {summary.data.ai_generated.map(i=>i.display).join(' · ')||'none'}</p>
+        <p className="mt-1"><b>Clinician-verified:</b> added by your clinician after the visit</p>
+        {(summary.data.missing.length>0||summary.data.uncertain.length>0)&&<p className="mt-1 text-amber-800"><b>Missing or uncertain:</b> {[...summary.data.missing.map(m=>`${m.label} (not provided)`),...summary.data.uncertain.map(u=>`${u.label} (not confirmed)`)].join(' · ')}</p>}
+        <p className="mt-1 text-slate-500">{summary.data.disclaimer}</p></div>}
       <fieldset className="mt-5"><legend className="text-sm font-semibold">Details to share</legend><ul className="mt-2 space-y-2">{snap.fields.map(f=><li key={f.key}><label className={`flex items-start gap-3 rounded-xl border p-3 text-sm ${f.confirmed_by_student?'border-slate-200':'border-dashed border-slate-200 opacity-60'}`}><input type="checkbox" disabled={!f.confirmed_by_student} checked={keys.includes(f.key)} onChange={e=>setKeys(k=>e.target.checked?[...k,f.key]:k.filter(x=>x!==f.key))} className="mt-0.5 size-5 accent-teal-700"/><span><span className="block text-xs font-semibold text-slate-500">{f.label} · {PROVENANCE[f.provenance]}</span>{f.display}{!f.confirmed_by_student&&<span className="block text-xs text-amber-700">Confirm this first to share it</span>}</span></label></li>)}</ul></fieldset>
       {(photos.data?.length ?? 0)>0&&<fieldset className="mt-4"><legend className="text-sm font-semibold">Photos (off unless you choose)</legend><ul className="mt-2 space-y-2">{photos.data!.map(p=><li key={p.id}><label className="flex items-center gap-3 rounded-xl border border-slate-200 p-2 text-sm"><input type="checkbox" checked={photoIds.includes(p.id)} onChange={e=>setPhotoIds(x=>e.target.checked?[...x,p.id]:x.filter(y=>y!==p.id))} className="size-5 accent-teal-700"/><img src={p.image_url} alt="Photo you may share" className="size-12 rounded-lg object-cover"/><span>Share this photo with my clinician</span></label></li>)}</ul></fieldset>}
       <div className="mt-4 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600"><b>Never shared:</b> raw audio, your conversation transcript, and any photo you don’t tick. <b>Professors</b> never receive any of these details.</div>

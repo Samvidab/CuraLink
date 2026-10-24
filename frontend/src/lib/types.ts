@@ -198,9 +198,9 @@ export interface Impact { start_date: string; end_date: string; days: ImpactDay[
 export interface DeliveryRow { id: string; course_code: string; destination: string; state: 'QUEUED' | 'SENT' | 'FAILED' | 'CANCELLED'; attempts: number; error_code: string | null; receipt_id: string | null; sent_at: string | null; version_id: string }
 export interface TimelineItem { event_type: string; actor: string; to_state: string | null; status: string; at: string; detail: string | null }
 export interface StudentCase {
-  id: string; status: string; status_label: string; encounter_id: string; visit_type: string; appointment_at: string; clinician_name: string
+  id: string; status: string; status_label: string; origin: 'student' | 'clinician'; encounter_id: string; visit_type: string; appointment_at: string; clinician_name: string
   requested_start: string; requested_end: string; disclosure_consent: boolean; consent_revoked_at: string | null
-  decision: { decision: 'CERTIFY' | 'DECLINE'; start_date: string | null; end_date: string | null } | null
+  decision: { decision: 'CERTIFY' | 'DECLINE' | 'DEFER'; start_date: string | null; end_date: string | null } | null
   document: { version: number; state: string; signed_at: string | null } | null
   deliveries: DeliveryRow[]; timeline: TimelineItem[]; created_at: string; excused_status: string
   metrics: { request_to_delivery_seconds: number | null; student_actions: number }
@@ -208,9 +208,9 @@ export interface StudentCase {
 export interface DraftMessage extends Recipient { subject: string; body: string; include: boolean }
 export interface DocVersion { id: string; version: number; state: 'UNSIGNED' | 'SIGNED' | 'SUPERSEDED' | 'REVOKED'; unsigned_sha256: string; signed_sha256: string | null; signed_at: string | null; created_at: string; content: { start_date: string; end_date: string; wording: string; courses: { code: string; dates: string[] }[]; days: ImpactDay[]; messages: DraftMessage[] } }
 export interface ClinicianCase {
-  id: string; status: string; status_label: string; encounter_id: string; visit_type: string; appointment_at: string; student_name: string
+  id: string; status: string; status_label: string; origin: 'student' | 'clinician'; encounter_id: string; visit_type: string; appointment_at: string; student_name: string
   requested_start: string; requested_end: string; student_note: string | null
-  decision: { decision: 'CERTIFY' | 'DECLINE'; start_date: string | null; end_date: string | null; wording: string | null; rationale_private: string | null; version: number } | null
+  decision: { decision: 'CERTIFY' | 'DECLINE' | 'DEFER'; start_date: string | null; end_date: string | null; wording: string | null; rationale_private: string | null; version: number } | null
   impact: Impact | null; document: DocVersion | null; signature_asset: { id: string; kind: string; created_at: string } | null
   gates: { student_consent: boolean; signed: boolean; recipients_verified: boolean }
   deliveries: DeliveryRow[]; timeline: TimelineItem[]

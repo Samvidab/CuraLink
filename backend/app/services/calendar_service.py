@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import Calendar, CalendarEvent, Course, User
-from app.services import audit, catalog
+from app.services import audit, instructor_directory
 from app.services.ics_import import ParsedCalendar, parse_ics
 
 _FALLBACK_COLORS = ["bg-sky-500", "bg-teal-500", "bg-violet-500", "bg-amber-500", "bg-rose-500", "bg-indigo-500"]
@@ -17,6 +17,10 @@ def term_window(today: date) -> tuple[date, date]:
     return today - timedelta(days=70), today + timedelta(days=70)
 
 
+# CURALINK_CONFIG: CALENDAR_IMPORT
+# Existing UniTime .ics import. Parsing/validation (size limit, accepted types, recurrence handling)
+# lives in app/services/ics_import.py (MAX_ICS_BYTES, validate_upload, parse_ics); the HTTP endpoint is
+# POST /api/v1/calendars/import in app/routers/student.py. Only iCalendar (.ics) is supported.
 def import_calendar(db: Session, student: User, data: bytes, *, filename: str | None, source_mode: str) -> tuple[Calendar, ParsedCalendar]:
     settings = get_settings()
     # Expand over the file's own term (first meeting + ~one semester), so real exports for any term work.
@@ -43,17 +47,19 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
     for occ in parsed.occurrences:
         if not occ.course_code or occ.course_code in courses:
             continue
-        entry = catalog.lookup(occ.course_code)
-        # Instructor data from the student's own UniTime export wins over the demo catalog.
+        match = instructor_directory.resolve(occ.course_code, occ.section)
+        # Instructor data from the student's own UniTime export wins over catalog/directory lookups.
         instr = next((i for o in parsed.occurrences if o.course_code == occ.course_code for i in o.instructors), None)
         if instr:
             name, email = instr
             status, provenance = ("VERIFIED" if email else "NEEDS_REVIEW"), "unitime_ics"
-        elif entry:
-            name, email, status, provenance = entry.get("instructor_name"), entry.get("instructor_email"), entry.get("contact_status", "MISSING"), "demo_catalog"
+            if not email and match.instructor_email and match.instructor_name == name:
+                email, status, provenance = match.instructor_email, match.contact_status, match.provenance
+        elif match.provenance != "none":
+            name, email, status, provenance = match.instructor_name, match.instructor_email, match.contact_status, match.provenance
         else:
             name, email, status, provenance = None, None, "MISSING", "ics"
-        title = occ.title or (entry or {}).get("title") or (occ.summary.split(" - ", 1)[1] if " - " in occ.summary else None)
+        title = occ.title or match.title or (occ.summary.split(" - ", 1)[1] if " - " in occ.summary else None)
         course = Course(
             id=f"crs_{uuid4().hex[:10]}",
             student_id=student.id,
@@ -64,7 +70,7 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
             instructor_email=email,
             contact_status=status,
             provenance=provenance,
-            color=(entry or {}).get("color") or _FALLBACK_COLORS[len(courses) % len(_FALLBACK_COLORS)],
+            color=match.color or _FALLBACK_COLORS[len(courses) % len(_FALLBACK_COLORS)],
         )
         db.add(course)
         courses[occ.course_code] = course

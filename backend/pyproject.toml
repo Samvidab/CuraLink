@@ -16,6 +16,7 @@ dependencies = [
   "httpx>=0.27",
   "websockets>=12",
   "pillow>=10",
+  "cryptography>=42",
   "anthropic>=1.0",
 ]
 

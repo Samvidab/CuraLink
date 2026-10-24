@@ -237,6 +237,7 @@ class AbsenceCase(Base):
     requested_start: Mapped[date] = mapped_column(Date)
     requested_end: Mapped[date] = mapped_column(Date)
     student_note: Mapped[str | None] = mapped_column(Text, nullable=True)  # clinician-only; never in professor messages
+    origin: Mapped[str | None] = mapped_column(String, nullable=True)  # student | clinician (NULL = student, older rows)
     disclosure_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     disclosure_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consent_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -250,7 +251,7 @@ class ClinicianAbsenceDecision(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     case_id: Mapped[str] = mapped_column(ForeignKey("absence_cases.id", ondelete="CASCADE"))
     clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    decision: Mapped[str] = mapped_column(String)  # CERTIFY | DECLINE
+    decision: Mapped[str] = mapped_column(String)  # CERTIFY | DECLINE (no certificate indicated) | DEFER
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     wording: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -288,7 +289,12 @@ class SignatureAsset(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    kind: Mapped[str] = mapped_column(String, default="demo_sample")
+    kind: Mapped[str] = mapped_column(String, default="demo_sample")  # demo_sample | drawn
+    # CURALINK_CONFIG: SIGNATURE_STORAGE
+    # Drawn signatures are stored here, AES-GCM encrypted (app/services/signature_vault.py), never as plain
+    # images and never in browser storage. Production: move blobs to a managed secret/object store.
+    encrypted_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -383,3 +389,15 @@ class IntakeAnnotation(Base):
     corrected_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ClinicalEvaluation(Base):
+    """Clinician-entered findings for an encounter. Clinician-only: never shown to students or professors."""
+
+    __tablename__ = "clinical_evaluations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    encounter_id: Mapped[str] = mapped_column(ForeignKey("encounters.id", ondelete="CASCADE"), unique=True)
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    values: Mapped[dict] = mapped_column(JSON, default=dict)  # keys from curalink_config.EXAMINATION_FIELDS
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
