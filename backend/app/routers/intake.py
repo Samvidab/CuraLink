@@ -181,7 +181,7 @@ def acknowledge_safety(session_id: str, user: User = Depends(require_student), d
 # ---- consentful handoff to the assigned clinician ---------------------------
 
 def _handoff_out(p: HandoffPacket) -> HandoffOut:
-    return HandoffOut(packet_id=p.id, encounter_id=p.encounter_id, version=p.version, status=p.status, shared_at=p.student_approved_at, field_keys=[f["key"] for f in p.field_snapshot])
+    return HandoffOut(packet_id=p.id, encounter_id=p.encounter_id, version=p.version, status=p.status, shared_at=p.student_approved_at, field_keys=[f["key"] for f in p.field_snapshot], attachment_ids=list(p.attachment_ids or []))
 
 
 def _latest_packet(db: Session, encounter_id: str) -> HandoffPacket | None:
@@ -217,8 +217,14 @@ def handoff(encounter_id: str, body: HandoffIn, user: User = Depends(require_stu
         if not f.confirmed_by_student:
             raise ApiError(409, "FIELD_NOT_CONFIRMED", "Review and confirm each detail before sharing it.", details={"key": key})
         chosen.append(f)
+    from app.models import Attachment
+
+    for aid in body.attachment_ids:
+        a = db.get(Attachment, aid)
+        if a is None or a.student_id != user.id or a.session_id != sess.id:
+            raise ApiError(422, "UNKNOWN_ATTACHMENT", "One of the selected photos no longer exists.")
     prev = _latest_packet(db, enc.id)
-    packet = HandoffPacket(
+    packet = HandoffPacket(attachment_ids=list(dict.fromkeys(body.attachment_ids)),
         id=f"pkt_{uuid4().hex[:10]}", encounter_id=enc.id, session_id=sess.id, version=(prev.version + 1) if prev else 1,
         field_snapshot=[{"key": f.key, "label": LABELS[f.key], "value": f.value, "display": display(f.key, f.value), "provenance": f.provenance, "confirmed_by_student": True, "updated_at": f.updated_at.isoformat()} for f in chosen],
         source_mode="demo",
@@ -228,7 +234,7 @@ def handoff(encounter_id: str, body: HandoffIn, user: User = Depends(require_stu
         prev.status = "SUPERSEDED"
     sess.status = "SHARED"
     from_state, enc.status = enc.status, "INTAKE_SHARED"
-    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="INTAKE_SHARED_WITH_CLINICIAN", object_type="encounter", object_id=enc.id, from_state=from_state, to_state="INTAKE_SHARED", detail=f"{len(chosen)} fields, v{packet.version}")
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="INTAKE_SHARED_WITH_CLINICIAN", object_type="encounter", object_id=enc.id, from_state=from_state, to_state="INTAKE_SHARED", detail=f"{len(chosen)} fields, {len(packet.attachment_ids)} photos, v{packet.version}")
     db.commit()
     return _handoff_out(packet)
 

@@ -14,6 +14,7 @@ FIELD_KEYS = (
     "appointment_preference",
     "accessibility_needs",
     "requests",
+    "photo_observations",
 )
 LABELS = {
     "symptoms_free_text": "What you're experiencing (your words)",
@@ -23,6 +24,7 @@ LABELS = {
     "appointment_preference": "Appointment preference",
     "accessibility_needs": "Accessibility needs",
     "requests": "Other requests",
+    "photo_observations": "Photo observations (non-diagnostic)",
 }
 # Fields a clinician handoff should usually have; temperature is requested but skippable.
 REQUESTED_FOR_HANDOFF = ("symptoms_free_text", "onset_text", "temperature")

@@ -194,6 +194,7 @@ def test_handoff_requires_confirmation_and_is_scoped(student, clinician, login):
     assert student.post(f"/api/v1/handoffs/{pkt['packet_id']}/withdraw").json()["status"] == "WITHDRAWN"
     assert clinician.get(f"/api/v1/clinician/encounters/{enc['id']}/intake").json() == {
         "encounter_id": enc["id"], "status": "WITHDRAWN", "packet_id": pkt["packet_id"], "version": 1, "shared_at": None, "fields": [], "consent": {},
+        "attachments": [], "annotations": {},
     }
 
 

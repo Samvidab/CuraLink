@@ -338,9 +338,11 @@ class SkipIn(BaseModel):
 class HandoffIn(BaseModel):
     student_authorized: bool
     field_keys: list[str] = Field(min_length=1, max_length=10)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class HandoffOut(BaseModel):
+    attachment_ids: list[str] = Field(default_factory=list)
     packet_id: str
     encounter_id: str
     version: int
@@ -368,6 +370,8 @@ class ClinicianIntakeOut(BaseModel):
     shared_at: datetime | None
     fields: list[IntakeFieldOut]
     consent: dict[str, bool]
+    attachments: list[dict] = Field(default_factory=list)
+    annotations: dict[str, dict] = Field(default_factory=dict)
 
 
 class VoiceSessionIn(BaseModel):

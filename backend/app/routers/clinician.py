@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, Response
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -6,12 +9,11 @@ from app import serializers as ser
 from app.config import get_settings
 from app.db import get_db
 from app.errors import ApiError
-from app.models import AbsenceCase, AuditEvent, Encounter, HandoffPacket, IntakeSession, User
+from app.models import AbsenceCase, Attachment, AuditEvent, Encounter, HandoffPacket, IntakeAnnotation, IntakeSession, User
 from app.schemas import ActivityOut, ClinicianDashboard, ClinicianIntakeOut, EncounterDetail, EncounterRow, IntakeFieldOut
-from app.services import audit
-from app.timeutil import utcnow
 from app.security import require_clinician
-from app.timeutil import as_utc, local_day_bounds, to_local
+from app.services import audit
+from app.timeutil import as_utc, local_day_bounds, to_local, utcnow
 
 router = APIRouter(prefix="/api/v1/clinician", tags=["clinician"])
 
@@ -107,7 +109,55 @@ def encounter_intake(encounter_id: str, user: User = Depends(require_clinician),
     audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="INTAKE_VIEWED", object_type="encounter", object_id=enc.id, detail=f"v{p.version}")
     db.commit()
     fields = [IntakeFieldOut(key=f["key"], label=f["label"], value=f["value"], display=f["display"], provenance=f["provenance"], confirmed_by_student=True, updated_at=f["updated_at"]) for f in p.field_snapshot]
+    atts = [db.get(Attachment, aid) for aid in (p.attachment_ids or [])]
+    attachments = [{"id": a.id, "observations": a.observations, "limitations": a.limitations, "quality": a.quality, "observer": a.observer, "synthetic_demo": a.synthetic_demo, "image_url": f"/api/v1/clinician/encounters/{enc.id}/attachments/{a.id}"} for a in atts if a]
+    notes = {}
+    for n in db.scalars(select(IntakeAnnotation).where(IntakeAnnotation.packet_id == p.id).order_by(IntakeAnnotation.created_at)).all():
+        notes[n.field_key] = {"decision": n.decision, "corrected_value": n.corrected_value, "note": n.note, "at": n.created_at.isoformat()}
     return ClinicianIntakeOut(
         encounter_id=enc.id, status="SHARED", packet_id=p.id, version=p.version, shared_at=p.student_approved_at, fields=fields,
-        consent={"intake_shared": True, "voice_transcript_shared": False, "photo_shared": False, "voice_used": bool(sess and sess.voice_consent)},
+        consent={"intake_shared": True, "voice_transcript_shared": False, "photo_shared": bool(attachments), "voice_used": bool(sess and sess.voice_consent)},
+        attachments=attachments, annotations=notes,
     )
+
+
+def _shared_packet(db: Session, enc: Encounter) -> HandoffPacket:
+    p = db.scalar(select(HandoffPacket).where(HandoffPacket.encounter_id == enc.id).order_by(HandoffPacket.version.desc()))
+    if p is None or p.status != "SHARED":
+        raise ApiError(403, "FORBIDDEN", "Nothing is currently shared for this encounter.", recoverable=False)
+    return p
+
+
+@router.get("/encounters/{encounter_id}/attachments/{attachment_id}")
+def shared_photo(encounter_id: str, attachment_id: str, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> Response:
+    """Only photos the student explicitly selected for this assigned encounter's current packet."""
+    enc = assigned_encounter(db, user, encounter_id)
+    p = _shared_packet(db, enc)
+    a = db.get(Attachment, attachment_id)
+    if a is None or attachment_id not in (p.attachment_ids or []):
+        raise ApiError(403, "FORBIDDEN", "This photo wasn't shared with you.", recoverable=False)
+    audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="PHOTO_VIEWED", object_type="attachment", object_id=a.id)
+    db.commit()
+    return Response(a.data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+class AnnotationIn(BaseModel):
+    field_key: str
+    decision: str = Field(pattern="^(accepted|corrected|rejected)$")
+    corrected_value: str | None = Field(None, max_length=1000)
+    note: str | None = Field(None, max_length=1000)
+
+
+@router.post("/encounters/{encounter_id}/intake/annotations")
+def annotate(encounter_id: str, body: AnnotationIn, user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> dict:
+    """Clinician accepts, corrects or rejects a student/AI-provided detail; the original stays intact."""
+    enc = assigned_encounter(db, user, encounter_id)
+    p = _shared_packet(db, enc)
+    if body.field_key not in {f["key"] for f in p.field_snapshot}:
+        raise ApiError(422, "UNKNOWN_FIELD", "That field isn't in the shared packet.")
+    if body.decision == "corrected" and not (body.corrected_value or "").strip():
+        raise ApiError(422, "VALUE_REQUIRED", "Enter the corrected value.")
+    db.add(IntakeAnnotation(id=f"ann_{uuid4().hex[:8]}", packet_id=p.id, field_key=body.field_key, clinician_id=user.id, decision=body.decision, corrected_value=(body.corrected_value or "").strip() or None, note=body.note))
+    audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="INTAKE_FIELD_REVIEWED", object_type="encounter", object_id=enc.id, detail=f"{body.field_key}: {body.decision}")
+    db.commit()
+    return {"field_key": body.field_key, "decision": body.decision}

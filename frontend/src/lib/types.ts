@@ -188,9 +188,9 @@ export interface IntakeReply {
   mode: 'claude' | 'scripted' | 'safety'
 }
 export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
-export interface Handoff { packet_id: string; encounter_id: string; version: number; status: string; shared_at: string; field_keys: string[] }
+export interface Handoff { packet_id: string; encounter_id: string; version: number; status: string; shared_at: string; field_keys: string[]; attachment_ids: string[] }
 export interface StudentEncounter { id: string; appointment_id: string | null; starts_at: string; visit_type: string; clinician_name: string; status: string; handoff: Handoff | null; source_mode: SourceMode }
-export interface ClinicianIntake { encounter_id: string; status: 'NOT_SHARED' | 'SHARED' | 'WITHDRAWN'; packet_id: string | null; version: number | null; shared_at: string | null; fields: IntakeField[]; consent: Record<string, boolean> }
+export interface ClinicianIntake { encounter_id: string; status: 'NOT_SHARED' | 'SHARED' | 'WITHDRAWN'; packet_id: string | null; version: number | null; shared_at: string | null; fields: IntakeField[]; consent: Record<string, boolean>; attachments: PhotoAttachment[]; annotations: Record<string, { decision: 'accepted' | 'corrected' | 'rejected'; corrected_value: string | null; note: string | null; at: string }> }
 
 export interface Recipient { course_id: string | null; course_code: string; course_title: string | null; instructor_name: string | null; email: string | null; contact_status: ContactStatus | 'STUDENT_CONFIRMED'; deliverable: boolean; blocked_reason: string | null; dates: string[]; meetings: number }
 export interface ImpactDay { date: string; weekday: string; weekend: boolean; meeting_count: number }
@@ -217,3 +217,9 @@ export interface ClinicianCase {
 export interface ClinicianCaseRow { id: string; student_name: string; encounter_id: string; visit_type: string; status: string; status_label: string; requested_start: string; requested_end: string; created_at: string }
 export interface SignRequest { nonce: string; expires_at: string; document_sha256: string; version: number; recipients: { course_code: string; email: string }[]; start_date: string; end_date: string }
 export interface InboxMessage { id: string; to: string; subject: string; body: string; attachment_name: string; attachment_sha256: string; received_at: string }
+
+export interface PhotoObservation { category: string; description: string; uncertainty: string }
+export interface PhotoAttachment {
+  id: string; observations: PhotoObservation[]; limitations: string[]; quality: { lighting: string; clarity: string; notes: string[]; usable: boolean }
+  observer: 'heuristic' | 'claude'; synthetic_demo: boolean; created_at?: string; image_url: string; labels?: Record<string, string>; disclaimer?: string; next_steps?: string[]
+}

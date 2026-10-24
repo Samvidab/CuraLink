@@ -12,7 +12,7 @@ from app import db as dbmod
 from app.config import get_settings
 from app.errors import install as install_errors
 from app.models import User
-from app.routers import absence, auth, clinician, intake, scheduling, student, system, voice
+from app.routers import absence, auth, clinician, intake, scheduling, student, system, vision, voice
 from app.security import CLIENT_HEADER
 
 log = logging.getLogger("curalink")
@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["Content-Type", CLIENT_HEADER],
     )
-    for r in (system.router, auth.router, student.router, scheduling.router, intake.router, voice.router, absence.router, clinician.router):
+    for r in (system.router, auth.router, student.router, scheduling.router, intake.router, voice.router, vision.router, absence.router, clinician.router):
         app.include_router(r)
     return app
 

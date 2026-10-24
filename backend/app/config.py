@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     cartesia_tts_model: str = "sonic-3.6"
     # Voice from Cartesia's documentation example; set your own in .env.
     cartesia_voice_id: str = "a0e99841-438c-4a64-b679-ae501e7d6091"
+    enable_photo_observations: bool = True
     voice_input_sample_rate: int = 16000
     voice_output_sample_rate: int = 24000
 

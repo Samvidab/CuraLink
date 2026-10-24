@@ -219,6 +219,7 @@ class HandoffPacket(Base):
     student_approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     clinician_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attachment_ids: Mapped[list] = mapped_column(JSON, default=list)  # photos the student chose to share
     source_mode: Mapped[str] = mapped_column(String, default="demo")
 
 
@@ -348,3 +349,37 @@ class TestInboxMessage(Base):
     attachment_name: Mapped[str] = mapped_column(String)
     attachment_sha256: Mapped[str] = mapped_column(String)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Attachment(Base):
+    """Student photo, metadata-stripped on upload. Deletable; shared only if selected in a handoff."""
+
+    __tablename__ = "attachments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("intake_sessions.id", ondelete="CASCADE"))
+    student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    media_type: Mapped[str] = mapped_column(String, default="image/png")
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    sha256: Mapped[str] = mapped_column(String)
+    quality: Mapped[dict] = mapped_column(JSON)
+    observations: Mapped[list] = mapped_column(JSON)
+    limitations: Mapped[list] = mapped_column(JSON)
+    observer: Mapped[str] = mapped_column(String)
+    synthetic_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntakeAnnotation(Base):
+    """Clinician review of a shared field. The student's original value is never overwritten."""
+
+    __tablename__ = "intake_annotations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    packet_id: Mapped[str] = mapped_column(ForeignKey("handoff_packets.id", ondelete="CASCADE"))
+    field_key: Mapped[str] = mapped_column(String)
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    decision: Mapped[str] = mapped_column(String)  # accepted | corrected | rejected
+    corrected_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
