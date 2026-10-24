@@ -1,0 +1,25 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import 'tailwindcss';
+
+@layer base {
+  :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color-scheme: light; }
+  body { min-width: 320px; background: #f6f8f8; }
+  button, a, input, select, textarea { outline-offset: 2px; }
+  button { cursor: pointer; }
+}
+
+@layer components {
+  .input {
+    width: 100%;
+    min-height: 2.75rem;
+    border-radius: .75rem;
+    border: 1px solid var(--color-slate-200);
+    background: white;
+    padding: .7rem .85rem;
+    color: var(--color-slate-900);
+    font-size: .875rem;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .input::placeholder { color: var(--color-slate-400); }
+  .input:focus { border-color: var(--color-teal-500); box-shadow: 0 0 0 3px var(--color-teal-100); outline: none; }
+}

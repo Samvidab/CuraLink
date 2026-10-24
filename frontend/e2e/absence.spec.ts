@@ -1,0 +1,67 @@
+import { expect, test } from '@playwright/test'
+import { H, resetDemo, studentWithCalendar } from './helpers'
+
+test.beforeEach(async ({ page }) => { await resetDemo(page); await studentWithCalendar(page) })
+
+test('student request → clinician decides, signs this version, sends to test inbox → student sees delivery', async ({ page, browser }) => {
+  test.setTimeout(180_000)
+  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: 'slot_04', student_approved: true, idempotency_key: 'e2e-absence-01' } })).ok()).toBeTruthy()
+
+  // --- Student requests review (not certification) and fixes contacts.
+  await page.goto('/student/cases')
+  await page.getByRole('button', { name: 'Request absence review' }).click()
+  await page.getByLabel('First date you may miss').fill('2026-10-28')
+  await page.getByLabel('Last date you may miss').fill('2026-10-29')
+  await page.getByRole('button', { name: /Review impacted classes/ }).click()
+  await expect(page.getByText('PHIL 208 · Ethics of Data')).toBeVisible()
+  await page.getByLabel('Instructor email for PHIL 208').fill('dana.williams@example.com')
+  const phil = page.locator('div.rounded-xl', { has: page.getByText('PHIL 208 · Ethics of Data') })
+  await phil.getByLabel(/I checked this address/).check()
+  await phil.getByRole('button', { name: 'Save contact' }).click()
+  const com = page.locator('div.rounded-xl', { has: page.getByText('COM 217 · Science Communication') })
+  await com.getByLabel(/I checked this address/).check()
+  await com.getByRole('button', { name: 'Save contact' }).click()
+  await expect(page.getByText('Recipient confirmed by you')).toHaveCount(2)
+  await page.getByLabel(/I consent to CuraLink sending/).check()
+  await page.getByRole('button', { name: 'Submit for clinician review' }).click()
+  await expect(page.getByRole('heading', { name: 'Case submitted securely' })).toBeVisible()
+  await expect(page.getByText('Nothing has been sent yet.')).toBeVisible()
+
+  // --- Clinician.
+  const doc = await browser.newPage()
+  await doc.goto('/clinician/sign-in')
+  await doc.getByRole('button', { name: /Use demo clinician account/ }).click()
+  await doc.getByRole('button', { name: /Sign in to clinician portal/ }).click()
+  await doc.getByRole('link', { name: 'Signature Settings' }).click()
+  await doc.getByRole('button', { name: 'Enroll demo sample signature' }).click()
+  await expect(doc.getByText('Active')).toBeVisible()
+  await doc.getByRole('link', { name: 'Absence Cases' }).click()
+  await doc.getByText('Sam Lee').click()
+  await expect(doc.getByText('Clinician absence determination')).toBeVisible()
+  // Clinician narrows to a single day: only Wednesday meetings remain.
+  await doc.getByLabel('Inclusive last date').fill('2026-10-28')
+  await expect(doc.getByText('COM 217 ·')).toHaveCount(0)
+  await doc.getByRole('button', { name: 'Approve date range' }).click()
+  await doc.getByRole('button', { name: 'Generate document' }).click()
+  await expect(doc.getByText('Version 1 · unsigned')).toBeVisible()
+  await expect(doc.getByText(/Instructor messages \(3\)/)).toBeVisible()
+  await doc.getByRole('button', { name: 'Approve & sign this version' }).click()
+  const dialog = doc.getByRole('dialog')
+  await expect(dialog).toContainText('PHIL 208 → dana.williams@example.com')
+  await dialog.getByLabel('Re-enter your password').fill('curalink-demo')
+  await dialog.getByLabel(/I reviewed the full preview/).check()
+  await dialog.getByRole('button', { name: 'Confirm demo signature' }).click()
+  await expect(doc.getByText('Version 1 · signed (simulated)')).toBeVisible()
+  await doc.getByRole('button', { name: /Send authorized copies/ }).click()
+  await expect(doc.getByText('Delivery receipts')).toBeVisible()
+  await expect(doc.getByText('SENT', { exact: false }).first()).toBeVisible()
+  await doc.getByRole('link', { name: 'Open test inbox' }).click()
+  await expect(doc.getByText('To: mei.chen@example.com')).toBeVisible()
+  await expect(doc.getByText(/sore|throat|fever/i)).toHaveCount(0)
+  await doc.close()
+
+  // --- Student status.
+  await page.goto('/student/cases')
+  await expect(page.getByText('Delivered to test inbox', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Decided by your university')).toBeVisible()
+})
