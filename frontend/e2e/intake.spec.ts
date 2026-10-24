@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { H, resetDemo, studentWithCalendar } from './helpers'
+import { H, RIVERA_MON_1030, resetDemo, studentWithCalendar } from './helpers'
 
 test.beforeEach(async ({ page }) => { await resetDemo(page); await studentWithCalendar(page) })
 
@@ -25,7 +25,7 @@ test('intake in the student’s words → confirm → share with the assigned cl
   for (const box of await knows.getByRole('checkbox').all()) await box.check()
 
   // Book a demo appointment (via API to keep this test focused), then share.
-  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: 'slot_04', student_approved: true, idempotency_key: 'e2e-intake-0001' } })).ok()).toBeTruthy()
+  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: RIVERA_MON_1030, student_approved: true, idempotency_key: 'e2e-intake-0001' } })).ok()).toBeTruthy()
   await knows.getByRole('button', { name: 'Review what will be sent to your clinician' }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toContainText('Dr. Avery Rivera')
@@ -49,7 +49,7 @@ test('intake in the student’s words → confirm → share with the assigned cl
 
 test('optional photo: consent gate, tentative observations, opt-in sharing, clinician correction', async ({ page, browser }) => {
   test.setTimeout(150_000)
-  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: 'slot_04', student_approved: true, idempotency_key: 'e2e-photo-0001' } })).ok()).toBeTruthy()
+  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: RIVERA_MON_1030, student_approved: true, idempotency_key: 'e2e-photo-0001' } })).ok()).toBeTruthy()
   await page.goto('/student/voice')
   await page.getByRole('button', { name: 'Add or correct details' }).click()
   const drawer = page.getByRole('dialog')

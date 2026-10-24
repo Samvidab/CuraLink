@@ -88,6 +88,16 @@ No other credentials are needed for the hackathon. Clinic availability, email de
 - **Where:** `sample_data/demo_users.json` (names, credentials, verified flag), loaded by `backend/app/seed.py`; marker `CURALINK_CONFIG: CLINICIAN_CREDENTIALS`. The demo password (`curalink-demo`) is stored only as a scrypt hash.
 - **Test:** `pending.clinician@clinic.example.com` is refused; Dr. Hale can't open Dr. Rivera's patients.
 
+### C2b. Clinician availability and appointment lengths 🟢
+- **Where:**
+  - Weekly hours, vacations and extra hours: `sample_data/demo_availability.json` (`DEMO_CLINICIAN_AVAILABILITY`).
+  - Specialty, clinic, appointment types and self-reported attributes: the `profile` field in `demo_users.json` (`CLINICIAN_PROFILE_DATA`).
+  - Durations: `APPOINTMENT_DURATION` in `backend/app/curalink_config.py`.
+  - Clinic time zone: `SCHEDULING_TIMEZONE`.
+- Bookable times are generated only from these rules minus existing bookings. Nothing is invented, and a time shown on screen is not a reservation: it is re-checked at confirmation.
+- `TODO(CURALINK-MANUAL)`: the clinic's real scheduling feed for production.
+- **Test:** *Appointments → Specific clinician → Dr. Avery Rivera*. Thursday Oct 29 has no times because of the conference exception. Ask the assistant "Can I see Dr. Rivera?" to get the same real options.
+
 ### C3. Certificate template, wording and branding 🟢
 - **Where:**
   - Template: `backend/app/services/pdf_builder.py::render` (`CLINIC_CERTIFICATE_TEMPLATE`)

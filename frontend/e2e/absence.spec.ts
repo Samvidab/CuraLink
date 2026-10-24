@@ -1,11 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { H, resetDemo, studentWithCalendar } from './helpers'
+import { H, RIVERA_MON_1030, resetDemo, studentWithCalendar } from './helpers'
 
 test.beforeEach(async ({ page }) => { await resetDemo(page); await studentWithCalendar(page) })
 
 test('student request → clinician decides, signs this version, sends to test inbox → student sees delivery', async ({ page, browser }) => {
   test.setTimeout(180_000)
-  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: 'slot_04', student_approved: true, idempotency_key: 'e2e-absence-01' } })).ok()).toBeTruthy()
+  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: RIVERA_MON_1030, student_approved: true, idempotency_key: 'e2e-absence-01' } })).ok()).toBeTruthy()
 
   // --- Student requests review (not certification) and fixes contacts.
   await page.goto('/student/cases')

@@ -13,7 +13,7 @@ export default function TermSelector() {
   if (!data || data.terms.length === 0) return null
   const select = async (term: string) => {
     qc.setQueryData(['calendar-terms'], await api.put<TermsResponse>('/calendar/selected-term', { term }))
-    for (const key of ['calendar-events', 'student-dashboard', 'recommendations', 'impact-preview', 'schedule-review']) qc.invalidateQueries({ queryKey: [key] })
+    for (const key of ['calendar-events', 'student-dashboard', 'schedule-search', 'impact-preview', 'schedule-review']) qc.invalidateQueries({ queryKey: [key] })
   }
   const recent = data.terms.slice(-3)
   const older = data.terms.slice(0, -3)

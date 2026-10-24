@@ -91,6 +91,8 @@ export interface Activity {
 export interface AppointmentSummary {
   id: string
   state: string
+  clinician_id?: string | null
+  clinician_name?: string | null
   appointment_type: string
   clinic_name: string
   location: string
@@ -133,37 +135,6 @@ export interface ClinicianDashboard {
 
 export interface EncounterDetail extends EncounterRow { student_id: string; student_email: string; appointment_id: string | null }
 
-export interface AppointmentType { id: string; label: string }
-
-export interface Slot {
-  id: string
-  clinic_id: string
-  clinic_name: string
-  location: string
-  appointment_type: string
-  starts_at: string
-  ends_at: string
-  travel_minutes: number
-  status: string
-  permitted: boolean
-  source_mode: SourceMode
-}
-
-export interface Conflict { label: string; event_id: string | null; kind: 'CLASS_OVERLAP' | 'TRAVEL_BUFFER' | 'PERSONAL_BLOCK'; overlap_minutes: number }
-export interface SlotOption { rank: number; slot: Slot; score: number; reason_codes: string[]; conflicts: Conflict[]; source_mode: SourceMode }
-export interface RejectedSlot { slot: Slot; reason_code: string; conflicts: Conflict[] }
-
-export interface Recommendations {
-  options: SlotOption[]
-  rejected: RejectedSlot[]
-  calendar_considered: boolean
-  generated_at: string
-  source_mode: SourceMode
-  scoring: Record<string, number>
-}
-
-export interface SlotsResponse { slots: Slot[]; inventory_updated_at: string; source_mode: SourceMode; appointment_types: AppointmentType[] }
-
 export interface ConfirmResult { appointment_id: string; status: string; external_booking: boolean; appointment: AppointmentSummary; message: string }
 
 export type Provenance = 'voice' | 'text' | 'form' | 'photo_observation' | 'clinician'
@@ -196,6 +167,7 @@ export interface IntakeReply {
   form?: { fields: string[] } | null
   turn_id?: string | null
   fallback_reason?: LlmError | null
+  schedule?: ScheduleResult | null
 }
 export interface LlmError { category: string; http_status: number | null; error_type: string | null; message: string }
 export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
@@ -238,3 +210,19 @@ export interface PhotoAttachment {
 
 export interface TermInfo { term: string; first_meeting: string; last_meeting: string; meetings: number; courses: number; source: string }
 export interface TermsResponse { terms: TermInfo[]; selected: string | null; default: string | null; today: string }
+
+export interface ScheduleSlot {
+  id: string; clinician_id: string; clinician_name: string; appointment_type: string; appointment_label: string
+  starts_at: string; ends_at: string; minutes: number; clinic_name: string; location: string | null; travel_minutes: number
+  score: number | null; reason_codes: string[]; source_mode: SourceMode
+}
+export interface ClinicianCardData {
+  clinician_id: string; name: string; credentials: string | null; specialty: string; clinic_name: string; location: string | null
+  appointment_types: string[]; photo_url: string | null; bio: string | null; offers_type?: boolean; slots: ScheduleSlot[]; total_available?: number; excluded?: Record<string, number>
+}
+export interface ScheduleResult {
+  appointment_type: string; appointment_label: string; start: string; days: number; part_of_day: string; sort: string; clinician_id: string | null
+  clinicians: ClinicianCardData[]; options: ScheduleSlot[]; excluded: Record<string, number>; notice: string | null
+  alternatives: { same_clinician: ScheduleSlot[]; other_clinicians: ScheduleSlot[] }; calendar_considered: boolean; term: string | null; source_mode: SourceMode
+}
+export interface ClinicianListing { clinicians: ClinicianCardData[]; appointment_types: { id: string; label: string }[]; specialties: string[] }
