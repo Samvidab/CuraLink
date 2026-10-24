@@ -9,7 +9,17 @@ test('student onboarding imports the sample calendar and lands on a live dashboa
   await page.goto('/')
   await expect(page).toHaveURL(/select-role/)
   await page.getByRole('button', { name: /I'm a student/ }).click()
+  await expect(page).toHaveURL(/student\/sign-in/)
+  // Regression: the email/password fields must accept typing (they were effectively read-only before).
+  await page.getByLabel('Student email').fill('sam.lee@students.example.com')
+  await expect(page.getByLabel('Student email')).toHaveValue('sam.lee@students.example.com')
+  await page.getByLabel('Password').fill('not-the-password')
+  await page.getByRole('button', { name: /Sign in to student portal/ }).click()
+  await expect(page.getByRole('alert')).toContainText('incorrect')
+  await page.getByLabel('Password').fill('curalink-demo')
+  await page.getByLabel('Password').press('Enter')
   await expect(page.getByRole('heading', { name: 'Tell us about you' })).toBeVisible()
+  await expect(page.getByText('sam.lee@students.example.com')).toBeVisible()
   await expect(page.getByLabel('Full name')).toHaveValue('Sam Lee')
   await page.getByRole('button', { name: 'Continue' }).click()
   await page.getByRole('button', { name: 'Use fictional sample calendar' }).click()
@@ -45,6 +55,19 @@ test('clinician signs in with the demo account and sees only assigned encounters
   await expect(page.getByText(/hasn’t requested an absence review/)).toBeVisible()
   await page.goto('/student/dashboard')
   await expect(page.getByText('403 · ACCESS DENIED')).toBeVisible()
+})
+
+test('a student account cannot enter the clinician portal, and vice versa', async ({ page }) => {
+  await page.goto('/clinician/sign-in')
+  await page.getByLabel('Professional email').fill('sam.lee@students.example.com')
+  await page.getByLabel('Password').fill('curalink-demo')
+  await page.getByRole('button', { name: /Sign in to clinician portal/ }).click()
+  await expect(page.getByRole('alert')).toContainText("can't use the clinician portal")
+  await page.goto('/student/sign-in')
+  await page.getByLabel('Student email').fill('dr.rivera@clinic.example.com')
+  await page.getByLabel('Password').fill('curalink-demo')
+  await page.getByRole('button', { name: /Sign in to student portal/ }).click()
+  await expect(page.getByRole('alert')).toContainText("can't use the student portal")
 })
 
 test('unverified clinician account is refused', async ({ page }) => {

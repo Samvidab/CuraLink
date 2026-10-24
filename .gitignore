@@ -30,3 +30,6 @@ backend/*.db-journal
 !.env.example
 frontend/test-results/
 frontend/playwright-report/
+
+# Local launcher state/logs
+.run/

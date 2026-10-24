@@ -26,7 +26,7 @@ function Splash() {
 function RequireRole({ role, children }: PropsWithChildren<{ role: Role }>) {
   const { me, loading } = useAuth()
   if (loading) return <Splash/>
-  if (!me) return <Navigate to={role === 'clinician' ? '/clinician/sign-in' : '/select-role'} replace/>
+  if (!me) return <Navigate to={role === 'clinician' ? '/clinician/sign-in' : '/student/sign-in'} replace/>
   if (me.role !== role) return <Forbidden/>
   return <>{children}</>
 }
@@ -48,6 +48,7 @@ export default function App() {
     <Route path="/" element={<Home/>}/>
     <Route path="/select-role" element={<Onboarding initialStep={0}/>}/>
     <Route path="/clinician/sign-in" element={<Onboarding initialStep={4}/>}/>
+    <Route path="/student/sign-in" element={<Onboarding initialStep={5}/>}/>
     <Route path="/student/onboarding" element={<RequireRole role="student"><Onboarding initialStep={1}/></RequireRole>}/>
     <Route path="/student/import" element={<RequireRole role="student"><Onboarding initialStep={2}/></RequireRole>}/>
     <Route path="/student" element={<RequireRole role="student"><StudentShell/></RequireRole>}>
