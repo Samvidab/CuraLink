@@ -1,0 +1,18 @@
+{
+  "_note": "FICTIONAL demo personas. Demo password for every account: curalink-demo. Never use real people or real addresses.",
+  "students": [
+    { "id": "demo-student-1", "display_name": "Sam Lee", "email": "sam.lee@students.example.com", "calendar": null },
+    { "id": "demo-student-2", "display_name": "Jordan Kim", "email": "jordan.kim@students.example.com", "calendar": "sample.ics" },
+    { "id": "demo-student-3", "display_name": "Taylor Brooks", "email": "taylor.brooks@students.example.com", "calendar": null }
+  ],
+  "clinicians": [
+    { "id": "demo-clinician-1", "display_name": "Dr. Avery Rivera", "email": "dr.rivera@clinic.example.com", "credentials": "MD (fictional)", "verified": true },
+    { "id": "demo-clinician-2", "display_name": "Dr. Morgan Hale", "email": "dr.hale@clinic.example.com", "credentials": "DO (fictional)", "verified": true },
+    { "id": "demo-clinician-unverified", "display_name": "Pat Unverified", "email": "pending.clinician@clinic.example.com", "credentials": null, "verified": false }
+  ],
+  "encounters": [
+    { "id": "enc_jordan_1", "student_id": "demo-student-2", "clinician_id": "demo-clinician-1", "starts_at": "2026-10-26T09:00:00-04:00", "visit_type": "General consultation", "status": "INTAKE_SHARED" },
+    { "id": "enc_taylor_1", "student_id": "demo-student-3", "clinician_id": "demo-clinician-1", "starts_at": "2026-10-26T13:15:00-04:00", "visit_type": "Routine checkup", "status": "UPCOMING" },
+    { "id": "enc_jordan_hale", "student_id": "demo-student-2", "clinician_id": "demo-clinician-2", "starts_at": "2026-10-27T10:00:00-04:00", "visit_type": "Vaccinations", "status": "UPCOMING" }
+  ]
+}

@@ -36,6 +36,11 @@ react(),
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
+      // CuraLink API (FastAPI) runs separately; same-origin proxy keeps the
+      // HttpOnly session cookie first-party. Override with CURALINK_API_URL.
+      proxy: {
+        '/api': { target: process.env.CURALINK_API_URL || 'http://127.0.0.1:8000', changeOrigin: false, ws: true },
+      },
       watch: {
         ignored: [
           '**/.figma/**',

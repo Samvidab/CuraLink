@@ -1,0 +1,17 @@
+import { useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { Badge, Card, ErrorBanner, Icon, LoadingBlock } from '../../components/ui'
+import { api } from '../../lib/api'
+import { fmtDateLong, fmtDay, fmtTime } from '../../lib/format'
+import type { ClinicianDashboard as Dashboard } from '../../lib/types'
+
+const statusTone = (s: string) => (s === 'CLINICIAN_REVIEW' ? 'amber' : s === 'INTAKE_SHARED' ? 'blue' : 'slate')
+
+export default function ClinicianDashboard() {
+  const navigate = useNavigate()
+  const { data, error, isLoading, refetch } = useQuery({ queryKey: ['clinician-dashboard'], queryFn: () => api.get<Dashboard>('/clinician/dashboard') })
+  if (error) return <ErrorBanner error={error} onRetry={() => refetch()} />
+  return <><div className="flex items-end justify-between"><div><Badge tone="blue">DEMO PROVIDER PORTAL</Badge><h1 className="mt-3 text-3xl font-semibold">Good morning, {data?.display_name ?? '…'}</h1><p className="mt-2 text-slate-500">Review today’s appointments and documentation queues.</p></div><p className="hidden text-sm text-slate-500 sm:block">{data?fmtDateLong(data.today):''}</p></div>
+    {isLoading||!data?<div className="mt-7 grid gap-4 sm:grid-cols-3"><LoadingBlock/><LoadingBlock/><LoadingBlock/></div>:<div className="mt-7 grid gap-4 sm:grid-cols-3"><Card className="p-5"><p className="text-sm text-slate-500">Appointments today</p><p className="mt-2 text-3xl font-semibold">{data.appointments_today}</p></Card><Card className="p-5"><p className="text-sm text-slate-500">Intakes to review</p><p className="mt-2 text-3xl font-semibold">{data.intakes_to_review}</p></Card><Card className="p-5"><p className="text-sm text-slate-500">Absence cases</p><p className="mt-2 text-3xl font-semibold">{data.absence_cases}</p></Card></div>}
+    <Card className="mt-7 overflow-hidden"><div className="flex items-center justify-between border-b border-slate-100 p-5"><h2 className="text-lg font-semibold">Today & upcoming</h2><Badge tone="slate">Privacy-safe list</Badge></div><div className="overflow-x-auto"><div className="min-w-[560px]"><div className="grid grid-cols-[130px_1fr_160px_50px] gap-3 border-b border-slate-100 bg-slate-50 px-5 py-3 text-xs font-semibold text-slate-500"><span>TIME</span><span>STUDENT</span><span>STATUS</span><span></span></div>{data?.encounters.length===0&&<p className="p-5 text-sm text-slate-500">No assigned appointments.</p>}{data?.encounters.map(r=><button key={r.id} onClick={()=>navigate(`/clinician/encounters/${r.id}`)} className="grid w-full grid-cols-[130px_1fr_160px_50px] items-center gap-3 border-b border-slate-100 px-5 py-4 text-left text-sm last:border-0 hover:bg-teal-50 focus-visible:bg-teal-50 focus-visible:outline-none"><span className="text-slate-500">{data.today===r.starts_at.slice(0,10)?fmtTime(r.starts_at):`${fmtDay(r.starts_at,undefined,{weekday:'short'})} ${fmtTime(r.starts_at)}`}</span><span><b>{r.student_name}</b><span className="block text-xs text-slate-500">{r.visit_type}</span></span><Badge tone={statusTone(r.status)}>{r.status_label}</Badge><Icon name="arrow"/></button>)}</div></div></Card></>
+}

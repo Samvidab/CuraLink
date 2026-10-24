@@ -1,0 +1,387 @@
+"""Wire contracts (Pydantic v2). Datetimes go out as ISO 8601 with offsets."""
+
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+SourceMode = Literal["demo", "uploaded", "real"]
+Role = Literal["student", "clinician"]
+
+
+class IntegrationStatus(BaseModel):
+    clinic_inventory: Literal["demo"] = "demo"
+    email_delivery: Literal["test_only"] = "test_only"
+    llm: Literal["live", "fallback"]
+    voice: Literal["live", "fallback"]
+
+
+class Health(BaseModel):
+    status: Literal["ok"] = "ok"
+    demo_mode: bool
+    demo_today: str
+    integrations: IntegrationStatus
+
+
+class DemoResetOut(BaseModel):
+    student_id: str
+    source_mode: SourceMode = "demo"
+
+
+class DemoPersona(BaseModel):
+    role: Role
+    display_name: str
+    email: str
+    note: str
+
+
+class DemoLoginIn(BaseModel):
+    persona: Role
+
+
+class LoginIn(BaseModel):
+    email: str = Field(max_length=254)
+    password: str = Field(min_length=1, max_length=200)
+    expected_role: Role | None = None
+
+
+class MeOut(BaseModel):
+    id: str
+    role: Role
+    display_name: str
+    email: str
+    timezone: str
+    demo: bool
+    credentials: str | None = None
+    permissions: list[str]
+
+
+class ProfileIn(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class CourseOut(BaseModel):
+    id: str
+    code: str
+    section: str | None
+    title: str | None
+    instructor_name: str | None
+    instructor_email: str | None
+    contact_status: Literal["VERIFIED", "NEEDS_REVIEW", "MISSING", "STUDENT_CONFIRMED"]
+    provenance: str
+    color: str | None
+
+
+class CalendarEventOut(BaseModel):
+    id: str
+    course_id: str | None
+    course_code: str | None
+    title: str
+    start_at: datetime
+    end_at: datetime
+    location: str | None
+    all_day: bool
+    kind: str
+    rescheduled: bool
+    source: SourceMode | str
+
+
+class CalendarSummary(BaseModel):
+    calendar_id: str
+    source_mode: SourceMode | str
+    filename: str | None
+    timezone: str
+    imported_at: datetime
+    events_imported: int
+    warnings: list[str]
+
+
+class CalendarImportOut(BaseModel):
+    calendar_id: str
+    events_imported: int
+    courses: list[CourseOut]
+    timezone: str
+    warnings: list[str]
+    source_mode: SourceMode | str
+
+
+class CalendarEventsOut(BaseModel):
+    events: list[CalendarEventOut]
+    timezone: str
+    calendar: CalendarSummary | None
+
+
+class ActivityOut(BaseModel):
+    id: int
+    event_type: str
+    actor: str
+    object_type: str | None
+    object_id: str | None
+    from_state: str | None
+    to_state: str | None
+    status: str
+    detail: str | None
+    source_mode: str
+    at: datetime
+
+
+class AppointmentSummary(BaseModel):
+    id: str
+    state: str
+    appointment_type: str
+    clinic_name: str
+    location: str
+    starts_at: datetime
+    ends_at: datetime
+    source_mode: SourceMode | str
+    external_booking: bool = False
+
+
+class StudentDashboard(BaseModel):
+    today: str
+    timezone: str
+    display_name: str
+    calendar: CalendarSummary | None
+    courses: list[CourseOut]
+    todays_classes: list[CalendarEventOut]
+    next_appointment: AppointmentSummary | None
+    activity: list[ActivityOut]
+
+
+class EncounterRow(BaseModel):
+    id: str
+    student_name: str
+    starts_at: datetime
+    visit_type: str
+    status: str
+    status_label: str
+    source_mode: str
+
+
+class ClinicianDashboard(BaseModel):
+    today: str
+    display_name: str
+    appointments_today: int
+    intakes_to_review: int
+    absence_cases: int
+    encounters: list[EncounterRow]
+
+
+class EncounterDetail(EncounterRow):
+    student_id: str
+    student_email: str
+    appointment_id: str | None
+
+
+
+class AppointmentType(BaseModel):
+    id: str
+    label: str
+
+
+class SlotOut(BaseModel):
+    id: str
+    clinic_id: str
+    clinic_name: str
+    location: str
+    appointment_type: str
+    starts_at: datetime
+    ends_at: datetime
+    travel_minutes: int
+    status: str
+    permitted: bool
+    source_mode: SourceMode | str
+
+
+class SlotsOut(BaseModel):
+    slots: list[SlotOut]
+    inventory_updated_at: str
+    source_mode: SourceMode | str
+    appointment_types: list[AppointmentType]
+
+
+class SchedulePreferences(BaseModel):
+    avoid_class_conflicts: bool = True
+    allow_conflicts: bool = False
+    max_travel_minutes: int | None = Field(None, ge=0, le=240)
+    earliest_hour: int | None = Field(None, ge=0, le=23)
+    latest_hour: int | None = Field(None, ge=1, le=24)
+
+
+class RecommendationIn(BaseModel):
+    appointment_type: str | None = None
+    start: str | None = None  # YYYY-MM-DD (local); defaults to demo today
+    days: int = Field(5, ge=1, le=21)
+    preferences: SchedulePreferences = SchedulePreferences()
+
+
+class ConflictOut(BaseModel):
+    label: str
+    event_id: str | None
+    kind: Literal["CLASS_OVERLAP", "TRAVEL_BUFFER", "PERSONAL_BLOCK"]
+    overlap_minutes: int
+
+
+class OptionOut(BaseModel):
+    rank: int
+    slot: SlotOut
+    score: float
+    reason_codes: list[str]
+    conflicts: list[ConflictOut]
+    source_mode: SourceMode | str
+
+
+class RejectedOut(BaseModel):
+    slot: SlotOut
+    reason_code: str
+    conflicts: list[ConflictOut]
+
+
+class RecommendationsOut(BaseModel):
+    options: list[OptionOut]
+    rejected: list[RejectedOut]
+    calendar_considered: bool
+    generated_at: datetime
+    source_mode: SourceMode | str
+    scoring: dict[str, float]
+
+
+class ConfirmIn(BaseModel):
+    slot_id: str
+    student_approved: bool
+    idempotency_key: str = Field(min_length=8, max_length=80)
+
+
+class ConfirmOut(BaseModel):
+    appointment_id: str
+    status: str
+    external_booking: bool = False
+    appointment: AppointmentSummary
+    message: str
+
+
+class BlockIn(BaseModel):
+    start_at: datetime
+    end_at: datetime
+    label: str = Field("Personal block", min_length=1, max_length=60)
+
+
+class IntakeFieldOut(BaseModel):
+    key: str
+    label: str
+    value: dict
+    display: str
+    provenance: str
+    confirmed_by_student: bool
+    updated_at: datetime
+
+
+class IntakeSnapshot(BaseModel):
+    session_id: str
+    status: str
+    safety_state: str
+    voice_consent: bool
+    transcription_consent: bool
+    photo_consent: bool
+    fields: list[IntakeFieldOut]
+    missing_fields: list[str]
+    skipped_fields: list[str]
+
+
+class ConsentIn(BaseModel):
+    voice_consent: bool | None = None
+    transcription_consent: bool | None = None
+    photo_consent: bool | None = None
+
+
+class HistoryItem(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(max_length=4000)
+
+
+class IntakeMessageIn(BaseModel):
+    session_id: str | None = None
+    message: str = Field(min_length=1, max_length=2000)
+    channel: Literal["text", "voice"] = "text"
+    history: list[HistoryItem] = Field(default_factory=list, max_length=20)
+
+
+class IntakeReplyOut(BaseModel):
+    session_id: str
+    assistant_message: str
+    safety_state: Literal["GENERAL_SUPPORT", "EMERGENCY_GUIDANCE"]
+    safety_category: str | None
+    next_actions: list[str]
+    tool_events: list[dict]
+    field_updates: list[str]
+    missing_fields: list[str]
+    mode: Literal["claude", "scripted", "safety"]
+
+
+class FieldWrite(BaseModel):
+    key: str
+    value: dict
+
+
+class FieldsIn(BaseModel):
+    fields: list[FieldWrite] = Field(min_length=1, max_length=10)
+
+
+class ConfirmFieldIn(BaseModel):
+    confirmed: bool
+
+
+class SkipIn(BaseModel):
+    key: str
+
+
+class HandoffIn(BaseModel):
+    student_authorized: bool
+    field_keys: list[str] = Field(min_length=1, max_length=10)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
+
+
+class HandoffOut(BaseModel):
+    attachment_ids: list[str] = Field(default_factory=list)
+    packet_id: str
+    encounter_id: str
+    version: int
+    status: str
+    shared_at: datetime
+    field_keys: list[str]
+
+
+class StudentEncounterOut(BaseModel):
+    id: str
+    appointment_id: str | None
+    starts_at: datetime
+    visit_type: str
+    clinician_name: str
+    status: str
+    handoff: HandoffOut | None
+    source_mode: str
+
+
+class ClinicianIntakeOut(BaseModel):
+    encounter_id: str
+    status: Literal["NOT_SHARED", "SHARED", "WITHDRAWN"]
+    packet_id: str | None
+    version: int | None
+    shared_at: datetime | None
+    fields: list[IntakeFieldOut]
+    consent: dict[str, bool]
+    attachments: list[dict] = Field(default_factory=list)
+    annotations: dict[str, dict] = Field(default_factory=dict)
+
+
+class VoiceSessionIn(BaseModel):
+    voice_consent: bool
+
+
+class VoiceSessionOut(BaseModel):
+    session_id: str
+    mode: Literal["cartesia", "browser"]
+    stream_path: str | None
+    input: dict
+    output: dict
+    note: str

@@ -19,3 +19,20 @@ logs/
 # beside it.
 /.plugins/
 /.opencode-skills/
+
+# Backend
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/*.db
+backend/*.db-journal
+!.env.example
+frontend/test-results/
+frontend/playwright-report/
+
+# Local launcher state/logs
+.run/
+
+# Locally generated demo signature key (never commit)
+backend/.secrets/
