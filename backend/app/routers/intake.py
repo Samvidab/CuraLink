@@ -62,6 +62,8 @@ def tool_handler_for(db: Session, user: User):
     async def handle(name: str, args: dict) -> str:
         if name == "propose_intake_fields":
             return "Recorded as unconfirmed drafts for the student to review."
+        if name == "request_ui_action":
+            return f"Shown on the student's screen: {args.get('action')}."
         if name == "get_ranked_slots":
             t = args.get("appointment_type")
             recs = recommendations(RecommendationIn(appointment_type=None if t in (None, "any") else t), user, db)

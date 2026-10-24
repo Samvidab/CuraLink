@@ -155,3 +155,26 @@ def test_websocket_rejects_wrong_role_missing_consent_and_foreign_origin(student
             with client.websocket_connect("/api/v1/voice/stream", headers=headers) as ws:
                 ws.receive_json()
         assert exc.value.code == code
+
+
+def test_history_carries_over_and_latency_is_reported():
+    async def scenario():
+        out, seen = [], {}
+
+        async def send(m):
+            out.append(m)
+
+        async def respond(text, history):
+            seen["history"] = history
+            return {"assistant_message": "ok", "safety_state": "GENERAL_SUPPORT"}
+
+        v = VoiceSession("ins_1", send, respond, FakeStt(["and it hurts to swallow"]), SlowTts())
+        v.set_history([{"role": "user", "text": "I have a sore throat"}, {"role": "assistant", "text": "Sorry to hear that."}, {"role": "system", "text": "x"}])
+        await v.start()
+        await v.end_of_utterance()
+        await asyncio.sleep(0.6)
+        assert [h["text"] for h in seen["history"]] == ["I have a sore throat", "Sorry to hear that."]
+        first = next(m for m in out if m["type"] == "assistant.audio.chunk")
+        assert first["seq"] == 0 and first["ttfa_ms"] >= 0
+
+    asyncio.run(scenario())

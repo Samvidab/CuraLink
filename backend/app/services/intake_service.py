@@ -133,6 +133,9 @@ def _scripted(text: str, updated: list[str], notes: list[str], miss: list[str], 
 
 async def handle_message(db: Session, student: User, sess: IntakeSession, text: str, channel: str, history: list[dict], tool_handler) -> Reply:
     text = (text or "").strip()[:2000]
+    if sess.safety_state == "EMERGENCY_GUIDANCE":
+        # Routine flow stays paused on every channel until the student acknowledges the notice.
+        return Reply(sess.id, safety.EMERGENCY_MESSAGE, "EMERGENCY_GUIDANCE", None, ["EMERGENCY_HELP"], mode="safety")
     check = safety.screen(text)
     if check.state == "EMERGENCY_GUIDANCE":
         sess.safety_state = "EMERGENCY_GUIDANCE"
@@ -152,7 +155,9 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
             if guarded:
                 audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_OUTPUT_GUARDED", object_type="intake_session", object_id=sess.id)
             miss = missing(db, sess)
-            _, actions = _scripted(text, updated, [], miss, has_calendar)
+            _, scripted_actions = _scripted(text, updated, [], miss, has_calendar)
+            # Model-requested UI actions first; deterministic intent rules backfill.
+            actions = list(dict.fromkeys(turn.ui_actions + scripted_actions))
             db.commit()
             return Reply(sess.id, reply_text or "Okay.", "GENERAL_SUPPORT", None, actions, turn.tool_events, updated, miss, "claude")
         except llm_gateway.LlmUnavailable as exc:

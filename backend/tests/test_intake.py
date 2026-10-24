@@ -33,6 +33,8 @@ def test_high_risk_messages_halt_routine_flow(student, text, category):
 
 def test_safety_acknowledgement_is_explicit_and_audited(student):
     sid = _say(student, "chest pain")["session_id"]
+    # Routine requests stay paused (any channel) until acknowledged.
+    assert _say(student, "ok can I book an appointment")["mode"] == "safety"
     assert student.post(f"/api/v1/intake/sessions/{sid}/safety/acknowledge").json()["safety_state"] == "GENERAL_SUPPORT"
     acts = [a["event_type"] for a in student.get("/api/v1/students/me/activity").json()]
     assert "SAFETY_ESCALATION_SHOWN" in acts and "SAFETY_NOTICE_ACKNOWLEDGED" in acts
@@ -152,7 +154,7 @@ def test_safety_runs_before_the_model(student, monkeypatch):
 
 
 def test_unknown_tools_are_not_offered_to_the_model():
-    assert llm_gateway.ALLOWED_TOOLS == {"propose_intake_fields", "get_ranked_slots", "list_calendar_events"}
+    assert llm_gateway.ALLOWED_TOOLS == {"propose_intake_fields", "get_ranked_slots", "list_calendar_events", "request_ui_action"}
     assert not {"book_appointment", "send_email", "sign_document", "approve_provider", "grant_excuse"} & llm_gateway.ALLOWED_TOOLS
 
 

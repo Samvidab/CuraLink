@@ -115,6 +115,8 @@ async def voice_stream(ws: WebSocket) -> None:
                 elif kind == "text" and data.get("text"):
                     await voice.barge_in()
                     await voice.user_turn(str(data["text"])[:2000])
+                elif kind == "history" and isinstance(data.get("items"), list):
+                    voice.set_history(data["items"])
                 elif kind == "session.end":
                     break
         except WebSocketDisconnect:

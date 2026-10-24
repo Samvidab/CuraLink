@@ -20,6 +20,7 @@ export interface VoiceEvents {
   onReply: (reply: IntakeReply) => void
   onLevel: (level: number) => void
   onNotice: (message: string) => void
+  onMetric?: (m: { ttfa_ms?: number; interrupt_ms?: number }) => void
 }
 
 type SpeechRecognitionLike = {
@@ -54,7 +55,9 @@ registerProcessor('pcm-capture', PcmCapture)`
 
 const SPEECH_LEVEL = 0.035 // RMS threshold for "user is talking"
 const SPEECH_START_MS = 180
-const SPEECH_END_MS = 900
+// Ordinary mid-sentence pauses are often 0.5–1 s; wait longer before ending the turn.
+const SPEECH_END_MS = 1300
+const MIN_UTTERANCE_MS = 400
 
 export class VoiceController {
   state: VoiceState = 'IDLE'
@@ -71,6 +74,7 @@ export class VoiceController {
   private talkingSince = 0
   private silentSince = 0
   private userTalking = false
+  private utteranceStart = 0
   private muted = false
   private rec: SpeechRecognitionLike | null = null
   private turn = 0
@@ -164,6 +168,7 @@ export class VoiceController {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     this.ws = new WebSocket(`${proto}://${location.host}${this.info!.stream_path}`)
     this.ws.binaryType = 'arraybuffer'
+    this.ws.onopen = () => this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
     this.ws.onmessage = e => this.onServer(JSON.parse(e.data as string))
     this.ws.onclose = ev => {
       if (!this.active) return
@@ -185,7 +190,12 @@ export class VoiceController {
       if (!this.talkingSince) this.talkingSince = now
       if (!this.userTalking && now - this.talkingSince > SPEECH_START_MS) {
         this.userTalking = true
-        if (this.state === 'SPEAKING' || this.state === 'THINKING') this.interrupt() // barge-in
+        this.utteranceStart = this.talkingSince
+        if (this.state === 'SPEAKING' || this.state === 'THINKING') {
+          const t0 = performance.now()
+          this.interrupt() // barge-in: playback stops locally before the server even hears about it
+          this.ev.onMetric?.({ interrupt_ms: Math.round(performance.now() - t0) })
+        }
       }
     } else {
       this.talkingSince = 0
@@ -194,13 +204,14 @@ export class VoiceController {
         if (now - this.silentSince > SPEECH_END_MS) {
           this.userTalking = false
           this.silentSince = 0
-          this.ws?.send(JSON.stringify({ type: 'utterance.end' }))
+          if (now - this.utteranceStart - SPEECH_END_MS >= MIN_UTTERANCE_MS) this.ws?.send(JSON.stringify({ type: 'utterance.end' }))
         }
       }
     }
   }
 
-  private onServer(m: { type: string; turn_version: number; state?: VoiceState; text?: string; data?: string; reply?: IntakeReply; message?: string }) {
+  private onServer(m: { type: string; turn_version: number; state?: VoiceState; text?: string; data?: string; reply?: IntakeReply; message?: string; ttfa_ms?: number }) {
+    if (m.ttfa_ms !== undefined) this.ev.onMetric?.({ ttfa_ms: m.ttfa_ms })
     switch (m.type) {
       case 'state': if (m.state) this.set(m.state); break
       case 'transcript.partial': this.ev.onPartial(m.text ?? ''); break

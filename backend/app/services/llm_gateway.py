@@ -31,7 +31,9 @@ Hard rules:
 - Never invent values. Only call propose_intake_fields with information the student literally stated in this conversation. If a temperature has no unit, ask for the unit instead of guessing.
 - You cannot book appointments, send messages, sign or approve documents, or decide absence dates. Point the student to the on-screen controls for those steps.
 - All clinic availability is synthetic demo data; say so if you mention times.
-- Keep replies short and spoken-friendly: at most three sentences, no lists or markdown.
+- Sound like a calm, kind person: brief, natural, varied phrasing; usually one or two sentences (never more than three), no lists or markdown. Ask at most one question at a time.
+- Use the conversation so far; don't re-ask for details the student already gave.
+- When the student wants an appointment, call get_ranked_slots, mention one or two options briefly, and call request_ui_action with FIND_CARE so they can confirm on screen. When a detail like temperature, onset date or a photo would be easier to enter in a form, call request_ui_action with OPEN_INTAKE_FORM.
 - If the student mentions anything that could be an emergency, tell them to call 911 or go to the nearest emergency department."""
 
 TOOLS: list[dict] = [
@@ -86,11 +88,23 @@ TOOLS: list[dict] = [
         },
     },
 ]
+TOOLS.append({
+    "name": "request_ui_action",
+    "description": "Show a control on the student's screen. FIND_CARE: appointment options to confirm. OPEN_INTAKE_FORM: the details form (temperature, onset date, photo). START_CASE: absence request page. IMPORT_CALENDAR: calendar import. Never books or sends anything.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["action"],
+        "properties": {"action": {"type": "string", "enum": ["FIND_CARE", "OPEN_INTAKE_FORM", "START_CASE", "IMPORT_CALENDAR"]}},
+    },
+})
 ALLOWED_TOOLS = {t["name"] for t in TOOLS}
 TOOL_LABELS = {
     "propose_intake_fields": "Updating what CuraLink knows",
     "get_ranked_slots": "Comparing eligible slots",
     "list_calendar_events": "Reading class calendar",
+    "request_ui_action": "Opening on your screen",
 }
 
 ToolHandler = Callable[[str, dict], Awaitable[str]]
@@ -101,6 +115,7 @@ class LlmTurn:
     text: str
     tool_events: list[dict] = field(default_factory=list)
     proposed_fields: list[dict] = field(default_factory=list)
+    ui_actions: list[str] = field(default_factory=list)
     model: str | None = None
 
 
@@ -174,6 +189,8 @@ async def run_turn(history: list[dict], user_text: str, context_note: str, handl
             args = block.input if isinstance(block.input, dict) else {}
             if block.name == "propose_intake_fields":
                 turn.proposed_fields.extend(args.get("fields", []))
+            if block.name == "request_ui_action" and args.get("action") in ("FIND_CARE", "OPEN_INTAKE_FORM", "START_CASE", "IMPORT_CALENDAR"):
+                turn.ui_actions.append(args["action"])
             try:
                 content = await handle_tool(block.name, args)
                 status = "ok"

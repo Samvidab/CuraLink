@@ -9,6 +9,7 @@ synthesis and drops anything still in flight for older versions.
 import asyncio
 import base64
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
@@ -37,6 +38,11 @@ class VoiceSession:
         self._context: str | None = None
         self._partials: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._turn_started: float | None = None
+
+    def set_history(self, items: list[dict]) -> None:
+        """Carry over the text conversation so switching text -> voice keeps context."""
+        self.history = [{"role": i["role"], "text": str(i["text"])[:2000]} for i in items if i.get("role") in ("user", "assistant") and i.get("text")][-20:]
 
     async def emit(self, type_: str, **data) -> None:
         await self._send({"type": type_, "session_id": self.session_id, "turn_id": self.turn_id, "turn_version": self.turn_version, "ts": utcnow().isoformat(), **data})
@@ -73,6 +79,7 @@ class VoiceSession:
         await self._set("LISTENING")
 
     async def end_of_utterance(self) -> None:
+        self._turn_started = time.perf_counter()
         text = await self.stt.finalize()
         if not text:
             return
@@ -80,6 +87,8 @@ class VoiceSession:
 
     async def user_turn(self, text: str) -> None:
         async with self._lock:
+            if self._turn_started is None:
+                self._turn_started = time.perf_counter()
             self.turn_version += 1
             self.turn_id = f"turn_{uuid4().hex[:8]}"
             my_version = self.turn_version
@@ -109,7 +118,12 @@ class VoiceSession:
             async for chunk in self.tts.speak(text, context_id):
                 if version != self.turn_version:
                     return  # late chunk from a cancelled turn: never forwarded
-                await self.emit("assistant.audio.chunk", seq=seq, data=base64.b64encode(chunk).decode())
+                extra = {}
+                if seq == 0 and self._turn_started is not None:
+                    # Measured locally: end of student speech -> first synthesized audio sent.
+                    extra["ttfa_ms"] = round((time.perf_counter() - self._turn_started) * 1000)
+                    self._turn_started = None
+                await self.emit("assistant.audio.chunk", seq=seq, data=base64.b64encode(chunk).decode(), **extra)
                 seq += 1
             if version == self.turn_version:
                 await self.emit("assistant.audio.done", chunks=seq)
