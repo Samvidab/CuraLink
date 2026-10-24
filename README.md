@@ -41,7 +41,8 @@ Reset all demo data any time: `curl -X POST -H 'X-CuraLink-Client: web' http://1
 | Assistant | **Claude** (`claude-opus-5-5`, server-side, narrow read-only tools) when `ANTHROPIC_API_KEY` is set; otherwise a **scripted** rule-based fallback. Both share the same safety screen, output guard and never-invent field rules |
 | Voice | **Cartesia** streaming STT/TTS through the backend (key never reaches the browser) with barge-in and stale-audio rejection when `CARTESIA_API_KEY` is set; otherwise the browser's built-in speech APIs; otherwise text |
 | Structured intake with provenance, student confirmation, consented handoff, withdrawal | **Functional** |
-| Clinician multi-day decision, class-impact engine, immutable PDF versions (ReportLab, SHA-256), per-version sign with re-authentication + single-use nonce | **Functional**; the signature image is a **generated, watermarked DEMO sample** |
+| Clinician **Medical Evaluation & Absence Determination**: clinician-only exam findings; *no certificate* / *approve period (dates chosen manually, 1+ days)* / *defer*; class schedule used only after the decision | **Functional**; CuraLink never suggests a duration |
+| Medical certificate (all required fields, configurable wording/branding, demo verification ID), immutable PDF versions (SHA-256), per-version sign with re-authentication + single-use nonce | **Functional**; signatures are hand-drawn (encrypted at rest) or a generated sample, printed as **“SIMULATED SIGNATURE — DEMO, NOT VALID”** |
 | Instructor notices | **Functional** outbox with consent / signature / verified-recipient gates and idempotency; delivered **only to a local test inbox** (`/demo/inbox`), never by email |
 | Photo observations: consent-gated upload, EXIF/GPS stripped, quality checks, tentative allowlisted observations with uncertainty, opt-in sharing to the clinician only | **Functional**. Observer = Claude vision when a key is set, otherwise basic colour analysis (labelled “not a medical model”). Demo images are synthetic |
 | Clinician accept / correct / reject of shared fields (original preserved) | **Functional** |
@@ -66,6 +67,10 @@ Key rules enforced on the server, not in prompts:
 - Sending requires: student disclosure consent (re-checked at send time) + latest **signed** version + matching hash + unchanged approved recipients + verified, allowlisted addresses. Any edit creates a new unsigned version.
 - Audit events never contain symptoms, transcripts or document bodies.
 
+## Manual configuration
+
+Everything the team must supply by hand is in **[docs/MANUAL_SETUP_CHECKLIST.md](docs/MANUAL_SETUP_CHECKLIST.md)**; every `CURALINK_CONFIG` / `TODO(CURALINK-MANUAL)` marker is indexed in **[docs/DEVELOPER_CONFIGURATION.md](docs/DEVELOPER_CONFIGURATION.md)**.
+
 ## Integration status (be precise when presenting)
 
 - **Claude:** code path uses the official `anthropic` SDK (server-only key, `claude-opus-5-5`, strict tools, `fallbacks: "default"`). A contract test runs the real SDK against a local fake API to check the request shape and tool loop. **No live API call has been made from this repo yet** — add a key and run the check below before claiming it live.
@@ -87,8 +92,9 @@ Key rules enforced on the server, not in prompts:
 ## Tests
 
 ```bash
-cd backend && uv run pytest              # 99 tests: ICS/UniTime, ranking, RBAC, safety, Claude SDK contract, voice barge-in, vision, signing/outbox gates
-cd frontend && npx tsc --noEmit && npx playwright test   # 15 E2E flows incl. login regression and a11y/responsive sweep (servers must be running)
+cd backend && uv run pytest              # 113 tests: ICS/UniTime, ranking, RBAC, safety, Claude SDK contract, voice, vision, clinician workflow, signing/outbox gates, config markers
+cd frontend && npx tsc --noEmit -p .     # typecheck
+./run_demo.sh e2e                        # 15 Playwright flows on an ISOLATED stack (:8011/:8454, own DB) — never touches your demo data
 ```
 
 Acceptance tests from the Implementation Plan covered in code: AT-01–AT-14, AT-21 (simulated delayed TTS), AT-22–AT-29.
@@ -100,7 +106,7 @@ Acceptance tests from the Implementation Plan covered in code: AT-01–AT-14, AT
 3. **Appointments** → ranked demo slots with reasons; open “Why some times aren't shown”. Confirm the 2:30 PM slot via the explicit demo-booking dialog.
 4. Back in **Talk to CuraLink** → *Review what will be sent to your clinician* → share selected fields.
 5. **My Cases** → request review for Wed–Fri → fix the missing PHIL 208 contact → consent → submit.
-6. **Clinician** (second browser) → Signature Settings → enroll demo sample → Absence Cases → Sam Lee → read the shared intake → narrow the dates → *Approve date range* → *Generate document* → *Approve & sign this version* (re-enter password) → *Send authorized copies*.
+6. **Clinician** (second browser) → Signature Settings → **draw a signature** → Save → Absence Cases → Sam Lee → review the shared intake (accept/correct) → enter examination findings → *Approve an absence period* → type the dates → *Save absence period* (affected classes appear only now) → *Generate document* → *Approve & sign this version* (re-enter password) → *Send authorized copies*.
 7. Open the **test inbox**: minimal-disclosure notices, no symptoms. Student's **My Cases** shows “Delivered to test inbox … your university decides”.
 
 ## Known limitations

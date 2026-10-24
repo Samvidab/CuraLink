@@ -77,7 +77,7 @@ test('optional photo: consent gate, tentative observations, opt-in sharing, clin
   await expect(doc.getByAltText(/Student-shared photo/)).toBeVisible()
   await doc.getByRole('button', { name: 'Correct' }).first().click()
   await doc.getByLabel(/Corrected value for/).fill('Localized redness noted on exam (fictional)')
-  await doc.getByRole('button', { name: 'Save' }).click()
+  await doc.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(doc.getByText('Clinician corrected')).toBeVisible()
   await doc.close()
 })

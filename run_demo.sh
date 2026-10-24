@@ -4,12 +4,13 @@
 #   ./run_demo.sh status     show what is running
 #   ./run_demo.sh stop       stop only the processes this script started
 #   ./run_demo.sh reset      reset fictional demo data (asks for confirmation)
+#   ./run_demo.sh e2e        run browser tests on an ISOLATED stack (ports 8011/8454, separate DB)
 # Ports: API_PORT (default 8000), WEB_PORT (default 8443).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-RUN="$ROOT/.run"
 API_PORT="${API_PORT:-8000}"
 WEB_PORT="${WEB_PORT:-8443}"
+RUN="$ROOT/.run/$API_PORT"   # per-stack state, so a test stack never touches the demo stack
 API="http://127.0.0.1:$API_PORT"
 WEB="http://localhost:$WEB_PORT"
 mkdir -p "$RUN"
@@ -75,7 +76,7 @@ start() {
     echo "Web app started."
   fi
   echo
-  echo "Open $WEB   ·   stop with: ./run_demo.sh stop   ·   logs in .run/"
+  echo "Open $WEB   ·   stop with: API_PORT=$API_PORT ./run_demo.sh stop   ·   logs in .run/$API_PORT/"
 }
 
 case "${1:-start}" in
@@ -83,5 +84,12 @@ case "${1:-start}" in
   stop) stop ;;
   status) status ;;
   reset) reset ;;
-  *) echo "Usage: $0 [start|status|stop|reset]"; exit 2 ;;
+  e2e)
+    # Browser tests reset data on every test, so they get their own API, web server and database.
+    shift
+    E2E_DB="$ROOT/backend/e2e_isolated.db"
+    DATABASE_URL="sqlite:///$E2E_DB" API_PORT=8011 WEB_PORT=8454 "$0" start
+    (cd "$ROOT/frontend" && E2E_BASE_URL=http://localhost:8454 npx playwright test "$@")
+    ;;
+  *) echo "Usage: $0 [start|status|stop|reset|e2e]"; exit 2 ;;
 esac

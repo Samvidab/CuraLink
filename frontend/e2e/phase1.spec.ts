@@ -24,7 +24,7 @@ test('student onboarding imports the sample calendar and lands on a live dashboa
   await page.getByRole('button', { name: 'Continue' }).click()
   await page.getByRole('button', { name: 'Use fictional sample calendar' }).click()
   await expect(page.getByText('DEMO SAMPLE')).toBeVisible()
-  await expect(page.getByText('Contact needed')).toBeVisible() // PHIL 208: no invented email
+  await expect(page.getByText('Contact needed', { exact: true })).toBeVisible() // PHIL 208: no invented email
   await page.getByRole('button', { name: 'Continue' }).click()
   await page.getByRole('button', { name: /Go to dashboard/ }).click()
   await expect(page).toHaveURL(/student\/dashboard/)
@@ -51,8 +51,8 @@ test('clinician signs in with the demo account and sees only assigned encounters
   await expect(page.getByText('Jordan Kim')).toBeVisible()
   await expect(page.getByText('Taylor Brooks')).toBeVisible()
   await page.getByText('Jordan Kim').click()
-  await expect(page.getByText('Clinician absence determination')).toBeVisible()
-  await expect(page.getByText(/hasn’t requested an absence review/)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Medical Evaluation & Absence Determination' })).toBeVisible()
+  await expect(page.getByRole('radio', { name: 'Approve an absence period' })).not.toBeChecked()
   await page.goto('/student/dashboard')
   await expect(page.getByText('403 · ACCESS DENIED')).toBeVisible()
 })
