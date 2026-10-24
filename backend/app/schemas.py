@@ -64,6 +64,7 @@ class CourseOut(BaseModel):
     id: str
     code: str
     section: str | None
+    term: str | None = None
     title: str | None
     instructor_name: str | None
     instructor_email: str | None
@@ -82,6 +83,7 @@ class CalendarEventOut(BaseModel):
     location: str | None
     all_day: bool
     kind: str
+    term: str | None = None
     rescheduled: bool
     source: SourceMode | str
 
@@ -109,6 +111,7 @@ class CalendarEventsOut(BaseModel):
     events: list[CalendarEventOut]
     timezone: str
     calendar: CalendarSummary | None
+    term: str | None = None
 
 
 class ActivityOut(BaseModel):
@@ -139,6 +142,7 @@ class AppointmentSummary(BaseModel):
 
 class StudentDashboard(BaseModel):
     today: str
+    term: str | None = None
     timezone: str
     display_name: str
     calendar: CalendarSummary | None

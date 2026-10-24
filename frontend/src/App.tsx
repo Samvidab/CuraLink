@@ -10,6 +10,7 @@ import Dashboard from './pages/student/Dashboard'
 import FindCare from './pages/student/FindCare'
 import Assistant from './pages/student/Assistant'
 import Schedule from './pages/student/Schedule'
+import ScheduleReview from './pages/student/ScheduleReview'
 import AbsenceCenter from './pages/student/AbsenceCenter'
 import Settings from './pages/student/Settings'
 import ClinicianDashboard from './pages/clinician/ClinicianDashboard'
@@ -56,6 +57,7 @@ export default function App() {
       <Route path="dashboard" element={<Dashboard/>}/>
       <Route path="voice" element={<Assistant/>}/>
       <Route path="calendar" element={<Schedule/>}/>
+      <Route path="schedule-review" element={<ScheduleReview/>}/>
       <Route path="appointments" element={<FindCare/>}/>
       <Route path="cases" element={<AbsenceCenter/>}/>
       <Route path="settings" element={<Settings/>}/>

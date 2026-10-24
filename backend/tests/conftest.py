@@ -8,6 +8,16 @@ from app.seed import DEMO_PASSWORD, reset_demo
 HEADERS = {"X-CuraLink-Client": "web"}
 
 
+@pytest.fixture(autouse=True)
+def _no_live_integrations(monkeypatch):
+    """Tests never call real services, even if the developer's .env has keys. Tests that need a
+    'live' path stub it explicitly."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "anthropic_api_key", None)
+    monkeypatch.setattr(get_settings(), "cartesia_api_key", None)
+
+
 @pytest.fixture()
 def app():
     dbmod.configure("sqlite://")

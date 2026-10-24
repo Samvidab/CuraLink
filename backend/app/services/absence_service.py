@@ -33,7 +33,7 @@ from app.models import (
     User,
 )
 from app import curalink_config as cfg
-from app.services import audit, pdf_builder, signature_vault
+from app.services import audit, pdf_builder, signature_vault, terms
 from app.services.absence_mapper import Impact, Meeting, impacted
 from app.timeutil import as_utc, utcnow
 
@@ -43,8 +43,10 @@ DELIVERABLE_CONTACT = {"VERIFIED", "STUDENT_CONFIRMED"}
 # ---- impact & recipients ------------------------------------------------------
 
 def class_meetings(db: Session, student_id: str) -> list[Meeting]:
+    """Meetings in the student's selected semester only (other terms stay stored but never match)."""
+    term = terms.selected(db, db.get(User, student_id))
     codes = {c.id: c.code for c in db.scalars(select(Course).where(Course.student_id == student_id))}
-    rows = db.scalars(select(CalendarEvent).where(CalendarEvent.student_id == student_id, CalendarEvent.kind == "class", CalendarEvent.all_day.is_(False))).all()
+    rows = db.scalars(select(CalendarEvent).where(CalendarEvent.student_id == student_id, CalendarEvent.kind == "class", CalendarEvent.all_day.is_(False), terms.term_filter(term))).all()
     return [Meeting(e.id, e.course_id, codes.get(e.course_id, e.summary), as_utc(e.start_at), as_utc(e.end_at)) for e in rows]
 
 
@@ -63,7 +65,8 @@ def domain_allowed(email: str | None) -> bool:
 
 
 def recipients(db: Session, student_id: str, impact: Impact) -> list[dict]:
-    courses = {c.code: c for c in db.scalars(select(Course).where(Course.student_id == student_id))}
+    term = terms.selected(db, db.get(User, student_id))
+    courses = {c.code: c for c in db.scalars(select(Course).where(Course.student_id == student_id, (Course.term == term) | Course.term.is_(None) if term else True))}
     out = []
     for ci in impact.courses:
         c = courses.get(ci.course_code)

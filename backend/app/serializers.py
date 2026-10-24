@@ -9,7 +9,7 @@ from app.timeutil import as_utc, to_local
 
 def course(c: Course) -> CourseOut:
     return CourseOut(
-        id=c.id, code=c.code, section=c.section, title=c.title, instructor_name=c.instructor_name,
+        id=c.id, code=c.code, section=c.section, term=c.term, title=c.title, instructor_name=c.instructor_name,
         instructor_email=c.instructor_email, contact_status=c.contact_status, provenance=c.provenance, color=c.color,
     )
 
@@ -25,6 +25,7 @@ def event(e: CalendarEvent, tz: str, course_codes: dict[str, str]) -> CalendarEv
         location=e.location,
         all_day=e.all_day,
         kind=e.kind,
+        term=e.term,
         rescheduled=bool(e.recurrence_id) and datetime.fromisoformat(e.recurrence_id) != as_utc(e.start_at),
         source=e.source,
     )

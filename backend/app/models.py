@@ -67,7 +67,7 @@ class Course(Base):
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     code: Mapped[str] = mapped_column(String)
     section: Mapped[str | None] = mapped_column(String, nullable=True)
-    term: Mapped[str | None] = mapped_column(String, nullable=True)
+    term: Mapped[str | None] = mapped_column(String, nullable=True)  # e.g. "Fall 2026" (inferred from meeting dates)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     instructor_name: Mapped[str | None] = mapped_column(String, nullable=True)
     instructor_email: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -88,6 +88,7 @@ class Calendar(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     events_imported: Mapped[int] = mapped_column(Integer, default=0)
     warnings: Mapped[list] = mapped_column(JSON, default=list)
+    selected_term: Mapped[str | None] = mapped_column(String, nullable=True)  # student's chosen semester view
 
 
 class CalendarEvent(Base):
@@ -107,6 +108,7 @@ class CalendarEvent(Base):
     all_day: Mapped[bool] = mapped_column(Boolean, default=False)
     kind: Mapped[str] = mapped_column(String, default="class")  # class | personal_block
     source: Mapped[str] = mapped_column(String)  # demo | uploaded | manual
+    term: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class ClinicSlot(Base):

@@ -28,6 +28,7 @@ export interface Course {
   id: string
   code: string
   section: string | null
+  term?: string | null
   title: string | null
   instructor_name: string | null
   instructor_email: string | null
@@ -46,6 +47,7 @@ export interface CalendarEvent {
   location: string | null
   all_day: boolean
   kind: string
+  term?: string | null
   rescheduled: boolean
   source: SourceMode
 }
@@ -69,7 +71,7 @@ export interface CalendarImport {
   source_mode: SourceMode
 }
 
-export interface CalendarEvents { events: CalendarEvent[]; timezone: string; calendar: CalendarSummary | null }
+export interface CalendarEvents { events: CalendarEvent[]; timezone: string; calendar: CalendarSummary | null; term?: string | null }
 
 export interface Activity {
   id: number
@@ -99,6 +101,7 @@ export interface AppointmentSummary {
 
 export interface StudentDashboard {
   today: string
+  term?: string | null
   timezone: string
   display_name: string
   calendar: CalendarSummary | null
@@ -224,3 +227,6 @@ export interface PhotoAttachment {
   id: string; observations: PhotoObservation[]; limitations: string[]; quality: { lighting: string; clarity: string; notes: string[]; usable: boolean }
   observer: 'heuristic' | 'claude'; synthetic_demo: boolean; created_at?: string; image_url: string; labels?: Record<string, string>; disclaimer?: string; next_steps?: string[]
 }
+
+export interface TermInfo { term: string; first_meeting: string; last_meeting: string; meetings: number; courses: number; source: string }
+export interface TermsResponse { terms: TermInfo[]; selected: string | null; default: string | null; today: string }

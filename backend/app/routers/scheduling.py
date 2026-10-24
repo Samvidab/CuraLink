@@ -29,7 +29,7 @@ from app.schemas import (
 )
 from app import serializers as ser
 from app.security import require_student
-from app.services import audit, scheduling
+from app.services import audit, scheduling, terms
 from app.services.clinic_adapter import get_adapter
 from app.timeutil import as_utc, demo_now, to_local, utcnow
 
@@ -52,8 +52,9 @@ def _window(start: str | None, days: int, tz: str) -> tuple[datetime, datetime]:
 
 def _busy(db: Session, student: User, lo: datetime, hi: datetime) -> list[scheduling.Interval]:
     codes = {c.id: c.code for c in db.scalars(select(Course).where(Course.student_id == student.id))}
+    # Only the selected semester's meetings (plus personal blocks) count as conflicts.
     events = db.scalars(
-        select(CalendarEvent).where(CalendarEvent.student_id == student.id, CalendarEvent.start_at < hi, CalendarEvent.end_at > lo, CalendarEvent.all_day.is_(False))
+        select(CalendarEvent).where(CalendarEvent.student_id == student.id, CalendarEvent.start_at < hi, CalendarEvent.end_at > lo, CalendarEvent.all_day.is_(False), terms.term_filter(terms.selected(db, student)))
     ).all()
     busy = [
         scheduling.Interval(as_utc(e.start_at), as_utc(e.end_at), (codes.get(e.course_id) if e.course_id else None) or e.summary, e.id)

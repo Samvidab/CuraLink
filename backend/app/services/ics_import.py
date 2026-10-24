@@ -35,6 +35,7 @@ class Occurrence:
     title: str | None = None
     instructors: list[tuple[str | None, str | None]] = field(default_factory=list)  # (name, email) from ORGANIZER/ATTENDEE
     status: str | None = None
+    term: str | None = None  # e.g. "Fall 2026"; from the series' first meeting date (see term_for)
 
 
 @dataclass
@@ -118,18 +119,51 @@ def validate_upload(filename: str | None, content_type: str | None, data: bytes)
         raise ApiError(422, "ICS_INVALID", "This file doesn't look like an iCalendar (.ics) file.")
 
 
-def file_window(cal: Calendar, zone: ZoneInfo, span_days: int = 150) -> tuple[date, date] | None:
-    """Expansion window from the file itself: first meeting + one semester."""
-    starts = []
+# CURALINK_CONFIG: ACADEMIC_TERM
+# Term boundaries used to LABEL a class series by its first meeting date (UniTime exports carry no term field).
+# Purdue convention: Spring = Jan 1-May 15, Summer = May 16-Aug 14, Fall = Aug 15-Dec 31. Never inferred from course codes.
+TERM_BOUNDARIES = (((1, 1), "Spring"), ((5, 16), "Summer"), ((8, 15), "Fall"))
+MAX_SERIES_DAYS = 140  # a repeating class with no end date is limited to one term, never "every week forever"
+
+
+def term_for(d: date) -> str:
+    season = "Spring"
+    for (m, day), name in TERM_BOUNDARIES:
+        if (d.month, d.day) >= (m, day):
+            season = name
+    return f"{season} {d.year}"
+
+
+def _local_date(v, zone: ZoneInfo) -> date:
+    if isinstance(v, datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=zone)).astimezone(zone).date()
+    return v
+
+
+def series_spans(cal: Calendar, zone: ZoneInfo) -> dict[str, tuple[date, date, bool]]:
+    """UID -> (first meeting, last possible meeting, open_ended) from each master VEVENT's DTSTART/RRULE."""
+    spans: dict[str, tuple[date, date, bool]] = {}
     for ev in cal.walk("VEVENT"):
         dt = ev.get("DTSTART")
-        if dt is not None:
-            v = dt.dt
-            starts.append(v.astimezone(zone).date() if isinstance(v, datetime) and v.tzinfo else (v.date() if isinstance(v, datetime) else v))
-    if not starts:
-        return None
-    first = min(starts)
-    return first, first + timedelta(days=span_days)
+        if dt is None or ev.get("RECURRENCE-ID") is not None:
+            continue
+        uid = str(ev.get("UID") or "")
+        first = _local_date(dt.dt, zone)
+        rrule = ev.get("RRULE")
+        open_ended = False
+        if rrule:
+            until = rrule.get("UNTIL")
+            if until:
+                last = _local_date(until[0], zone)
+            elif rrule.get("COUNT"):
+                last = first + timedelta(days=7 * int(rrule["COUNT"][0]) + 7)
+            else:
+                last, open_ended = first + timedelta(days=MAX_SERIES_DAYS), True
+        else:
+            last = first
+        prev = spans.get(uid)
+        spans[uid] = (min(first, prev[0]), max(last, prev[1]), open_ended or prev[2]) if prev else (first, last, open_ended)
+    return spans
 
 
 def parse_ics(data: bytes, window_start: date | None, window_end: date | None, default_tz: str) -> ParsedCalendar:
@@ -163,9 +197,20 @@ def parse_ics(data: bytes, window_start: date | None, window_end: date | None, d
         if count > 1:
             warnings.append(f"Event {uid} appeared {count} times; duplicate copies were ignored.")
 
+    try:
+        spans = series_spans(cal, zone)
+    except Exception as exc:  # broken DTSTART/RRULE values
+        raise ApiError(422, "ICS_INVALID", "We couldn't read the dates in this calendar file. Try exporting it again or use the sample calendar.") from exc
     if window_start is None or window_end is None:
-        span = file_window(cal, zone)
-        window_start, window_end = span if span else (date.today(), date.today() + timedelta(days=150))
+        # Expand EVERY series over its own dates (all terms in the file), capped at ~2 years.
+        if spans:
+            window_start = min(v[0] for v in spans.values())
+            window_end = min(max(v[1] for v in spans.values()), window_start + timedelta(days=730)) + timedelta(days=1)
+        else:
+            window_start, window_end = date.today(), date.today() + timedelta(days=150)
+    open_ended = [uid for uid, v in spans.items() if v[2]]
+    if open_ended:
+        warnings.append(f"{len(open_ended)} repeating event(s) had no end date; limited to {MAX_SERIES_DAYS} days from their first meeting.")
     start = datetime(window_start.year, window_start.month, window_start.day, tzinfo=zone)
     end = datetime(window_end.year, window_end.month, window_end.day, tzinfo=zone)
     try:
@@ -200,6 +245,9 @@ def parse_ics(data: bytes, window_start: date | None, window_end: date | None, d
         key = (uid, start_utc)
         if key in seen:
             continue
+        span = spans.get(uid)
+        if span and span[2] and start_utc.astimezone(zone).date() > span[1]:
+            continue  # open-ended repeat beyond one term
         seen.add(key)
         summary = str(ev.get("SUMMARY") or "").strip()
         if not summary:
@@ -232,6 +280,7 @@ def parse_ics(data: bytes, window_start: date | None, window_end: date | None, d
                 title=title,
                 instructors=_instructors(ev),
                 status=status,
+                term=term_for(span[0] if span else start_utc.astimezone(zone).date()),
             )
         )
     if missing_summary:
