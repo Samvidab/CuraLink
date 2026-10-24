@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import IntakeField, IntakeSession, User
 from app.services import audit, dialog, llm_gateway, safety
+from app.services import names as profile_names
 from app.services.intake_fields import REQUESTED_FOR_HANDOFF, FieldError, display, extract, validate
 from app.timeutil import utcnow
 
@@ -168,7 +169,9 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
     has_calendar = db.scalar(select(Calendar.id).where(Calendar.student_id == student.id)) is not None
     fallback_reason = None
     if llm_gateway.available():
+        name = profile_names.address_name(student)
         context = (f"demo date {get_settings().demo_today.isoformat()}; calendar imported: {has_calendar}; channel: {channel}; "
+                   + (f"student's preferred name: {name}; " if name else "")
                    + dialog.context_for_model(conv, _field_displays(db, sess)))
         names, last = _schedule_context(db, student)
         sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)

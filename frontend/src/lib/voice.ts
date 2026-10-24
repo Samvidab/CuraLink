@@ -22,6 +22,7 @@ export interface VoiceEvents {
   onNotice: (message: string) => void
   onMetric?: (m: { ttfa_ms?: number; interrupt_ms?: number }) => void
   onCancelled?: () => void // the reply being spoken was cut off by the student
+  onGreeting?: (text: string) => void // the opening line being spoken (same text the transcript shows)
 }
 
 type SpeechRecognitionLike = {
@@ -84,14 +85,16 @@ export class VoiceController {
   private turn = 0
   private active = false
   private history: { role: 'user' | 'assistant'; text: string }[] = []
+  private greeting = ''
 
   constructor(events: VoiceEvents) { this.ev = events }
 
   private set(s: VoiceState) { this.state = s; this.ev.onState(s) }
 
   /** Caller must have obtained explicit voice consent first. */
-  async start(history: { role: 'user' | 'assistant'; text: string }[]) {
+  async start(history: { role: 'user' | 'assistant'; text: string }[], greeting = '') {
     this.history = history.slice(-10)
+    this.greeting = greeting
     this.active = true
     this.set('REQUESTING_MIC')
     try {
@@ -175,6 +178,8 @@ export class VoiceController {
     this.ws.binaryType = 'arraybuffer'
     this.ws.onopen = () => {
       this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
+      // New conversation: the server speaks its greeting (built from the signed-in profile) through Cartesia.
+      if (!this.history.some(h => h.role === 'user')) this.ws?.send(JSON.stringify({ type: 'greet' }))
       for (const chunk of this.preroll) this.ws?.send(chunk)
       this.preroll = []
     }
@@ -227,6 +232,7 @@ export class VoiceController {
       case 'state': if (m.state) this.set(m.state); break
       case 'transcript.partial': this.ev.onPartial(m.text ?? ''); break
       case 'transcript.final': this.acceptedVersion = m.turn_version; this.ev.onUserFinal(m.text ?? ''); break
+      case 'assistant.greeting': this.acceptedVersion = m.turn_version; this.ev.onGreeting?.(m.text ?? ''); break
       case 'assistant.text': if (m.reply && m.turn_version >= this.acceptedVersion) this.ev.onReply(m.reply); break
       case 'assistant.cancelled': this.acceptedVersion = m.turn_version; this.stopPlayback(); this.ev.onCancelled?.(); break
       case 'assistant.audio.chunk': if (m.turn_version >= this.acceptedVersion && m.data) this.play(m.data); break
@@ -287,6 +293,15 @@ export class VoiceController {
     this.rec = rec
     try { rec.start() } catch { this.fail('Could not start speech recognition.'); return }
     this.set('LISTENING')
+    if (this.greeting && !this.history.some(h => h.role === 'user')) {
+      this.ev.onGreeting?.(this.greeting)
+      if (this.muted) return
+      const mine = ++this.turn
+      const u = new SpeechSynthesisUtterance(this.greeting)
+      u.onend = () => { if (mine === this.turn && this.active) this.set('LISTENING') }
+      this.set('SPEAKING')
+      speechSynthesis.speak(u)
+    }
   }
 
   private async browserTurn(text: string, spoken = false) {

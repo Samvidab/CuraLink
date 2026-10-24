@@ -25,7 +25,12 @@ Open **http://localhost:8443**. Ports are configurable (`API_PORT=8001 WEB_PORT=
 | Student — Sam Lee | “I'm a student” → **Use demo student account** (`sam.lee@students.example.com` / `curalink-demo`) |
 | Clinician — Dr. Avery Rivera | “I'm a healthcare professional” → **Use demo clinician account** (`dr.rivera@clinic.example.com` / `curalink-demo`) |
 | Second clinician — Dr. Morgan Hale | `dr.hale@clinic.example.com` / `curalink-demo` (to show assignment scoping) |
+| New student | “I'm a student” → **Create a student account**. You're asked for your first, last and optional preferred name once, then greeted by that name. |
 | Unverified clinician | `pending.clinician@clinic.example.com` (is refused) |
+
+Nobody is signed in automatically. `/` is always the welcome page; if this browser still has a valid session, it offers **Continue as …** or **Sign out**. Session cookies end when the browser closes, and every sign-in replaces the browser's previous session on the server.
+
+Clinician sign-up (**Request a clinician account**) only creates an *unverified* account. Access requires a server-side step: `cd backend && uv run python -m app.admin verify-clinician <email>`.
 
 Reset all demo data any time: `curl -X POST -H 'X-CuraLink-Client: web' http://127.0.0.1:8000/api/v1/demo/reset`.
 
@@ -103,7 +108,7 @@ Acceptance tests from the Implementation Plan covered in code: AT-01–AT-14, AT
 
 ## Demo script (~3 min)
 
-1. **Student** → “I'm a student” → *Use demo student account* → Sign in → Continue → *Use fictional sample calendar* (note the timezone, the moved STAT 350 meeting, and the course with no instructor contact).
+1. **Student** → “I'm a student” → *Use demo student account* → Sign in (Sam's profile is complete, so this opens the dashboard) → *Settings → Import calendar* → *Use fictional sample calendar* (note the timezone, the moved STAT 350 meeting, and the course with no instructor contact).
 2. **Talk to CuraLink** → type or speak “I've had a sore throat and a fever of 100.8 F since yesterday”. Watch “What CuraLink knows” fill in with provenance; confirm each item. Try “I have chest pain” to see the safety stop.
 3. **Appointments**: clinician cards with times that fit your classes. Pick Dr. Avery Rivera, Mon 10:30 AM, review the details, tick the box and confirm. Or ask the assistant “Which doctors are available?”, then “Can I see Dr. Rivera?”. Dr. Rivera sees the appointment and Dr. Hale doesn't.
 4. Back in **Talk to CuraLink** → *Review what will be sent to your clinician* → share selected fields.

@@ -11,7 +11,8 @@ import type { Health, IntakeReply, IntakeSnapshot, ScheduleResult, ScheduleSlot,
 
 type Msg = { from: 'ai' | 'user'; text: string; actions?: string[]; tools?: ToolEvent[]; mode?: IntakeReply['mode']; interrupted?: boolean; schedule?: ScheduleResult | null }
 
-const GREETING: Msg = { from: 'ai', text: 'Hi — I’m CuraLink, your campus healthcare navigator. I can organize care, not diagnose. Tell me what’s going on in your own words, and I’ll help with appointments and paperwork for your clinician.' }
+// Shown until the personalized greeting (GET /assistant/greeting, from the signed-in profile) arrives.
+const GREETING: Msg = { from: 'ai', text: 'Hi! I’m CuraLink, your campus healthcare navigator. I can help organize care, not diagnose. How can I help you today?' }
 const PROMPTS = ['I feel sick and need a doctor’s appointment', 'I might miss class this week', 'Where can I find mental health support?', 'What should I bring to my appointment?']
 const STATE_LABEL: Record<VoiceState, string> = { IDLE: 'Start voice conversation', REQUESTING_MIC: 'Requesting microphone…', LISTENING: 'Listening…', THINKING: 'Thinking…', SPEAKING: 'Speaking — talk to interrupt', INTERRUPTED: 'Interrupted', RECONNECTING: 'Reconnecting…', TEXT_FALLBACK: 'Text mode', ERROR: 'Voice error' }
 const ACTIONS: Record<string, { label: string; to?: string }> = {
@@ -56,7 +57,11 @@ export default function Assistant() {
   const qc = useQueryClient()
   const health = useQuery({ queryKey: ['health'], queryFn: () => api.get<Health>('/health') })
   const intake = useIntake()
+  const greeting = useQuery({ queryKey: ['assistant-greeting'], queryFn: () => api.get<{ text: string }>('/assistant/greeting') })
+  const opening = (): Msg => ({ from: 'ai', text: greeting.data?.text ?? GREETING.text })
   const [messages, setMessages] = useState<Msg[]>([GREETING])
+  // Personalize the opening line in place while the conversation hasn't started.
+  useEffect(() => { if (greeting.data) setMessages(ms => (ms.length === 1 && ms[0].from === 'ai' ? [{ from: 'ai', text: greeting.data.text }] : ms)) }, [greeting.data])
   const [booking, setBooking] = useState<ScheduleSlot | null>(null)
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -107,7 +112,7 @@ export default function Assistant() {
     voiceRef.current?.stop()
     qc.setQueryData(['intake'], await api.post<IntakeSnapshot>('/intake/sessions/new'))
     qc.invalidateQueries({ queryKey: ['photos'] })
-    setMessages([GREETING]); setConvState('GREETING'); setEmergency(null); setInput('')
+    setMessages([opening()]); setConvState('GREETING'); setEmergency(null); setInput('')
   }
   const applyRef = useRef(applyReply)
   applyRef.current = applyReply
@@ -119,6 +124,7 @@ export default function Assistant() {
     onLevel: setLevel,
     onNotice: setNotice,
     onMetric: m => setMetric(x => ({ ...x, ...m })),
+    onGreeting: text => setMessages(ms => (ms.length === 1 && ms[0].from === 'ai' ? [{ from: 'ai', text }] : ms)),
     onCancelled: () => setMessages(ms => { const i = ms.map(x => x.from).lastIndexOf('ai'); return i < 0 ? ms : ms.map((x, j) => (j === i ? { ...x, interrupted: true } : x)) }),
   })
   const voice = voiceRef.current
@@ -147,7 +153,7 @@ export default function Assistant() {
     if (voiceOn) { voice.stop(); return }
     setNotice('')
     if (!intake.data?.voice_consent) { setConsentChecked(false); setConsentOpen(true); return }
-    void voice.start(history)
+    void voice.start(history, opening().text)
   }
   const acknowledge = async () => {
     const sid = intake.data?.session_id
@@ -174,6 +180,6 @@ export default function Assistant() {
     {intake.data&&<IntakeDrawer snap={intake.data} open={drawer} focus={drawerFocus} onClose={()=>{setDrawer(false);qc.invalidateQueries({queryKey:['intake']})}}/>}
     {booking&&<SlotConfirmDialog slot={booking} onClose={()=>setBooking(null)} onBooked={r=>{setBooking(null);setMessages(m=>[...m,{from:'ai',text:`Booked (demo): ${r.appointment.clinician_name}, ${fmtDay(r.appointment.starts_at)} ${fmtRange(r.appointment.starts_at,r.appointment.ends_at)} at ${r.appointment.clinic_name}. ${r.appointment.clinician_name} will see this appointment on their schedule.`}])}} onStale={msg=>{setBooking(null);setMessages(m=>[...m,{from:'ai',text:msg}])}}/>}
     {intake.data&&handoff&&<HandoffDialog snap={intake.data} onClose={()=>setHandoff(false)}/>}
-    {consentOpen&&<div role="dialog" aria-modal="true" aria-labelledby="vc-title" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-5"><Card className="max-w-md p-6"><Badge tone="blue">VOICE CONSENT</Badge><h2 id="vc-title" className="mt-4 text-xl font-semibold">Use your microphone?</h2><ul className="mt-3 list-disc space-y-1.5 pl-5 text-sm leading-6 text-slate-600">{liveVoice?<li>Your speech is streamed through CuraLink’s server to Cartesia for transcription and voice replies.</li>:<li>Your browser’s built-in speech recognition turns speech into text. Depending on your browser, that may use its vendor’s service.</li>}<li>CuraLink doesn’t store raw audio or the full transcript — only details you review in “What CuraLink knows”.</li><li>Nothing spoken is confirmed until you check it. You can switch to text at any time.</li></ul><label className="mt-4 flex items-start gap-3 text-sm"><input type="checkbox" checked={consentChecked} onChange={e=>setConsentChecked(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I agree to use voice for this conversation.</span></label><div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={()=>setConsentOpen(false)}>Keep typing</Button><Button disabled={!consentChecked} onClick={()=>{setConsentOpen(false);void voice.start(history).then(()=>qc.invalidateQueries({queryKey:['intake']}))}}>Start voice</Button></div></Card></div>}
+    {consentOpen&&<div role="dialog" aria-modal="true" aria-labelledby="vc-title" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-5"><Card className="max-w-md p-6"><Badge tone="blue">VOICE CONSENT</Badge><h2 id="vc-title" className="mt-4 text-xl font-semibold">Use your microphone?</h2><ul className="mt-3 list-disc space-y-1.5 pl-5 text-sm leading-6 text-slate-600">{liveVoice?<li>Your speech is streamed through CuraLink’s server to Cartesia for transcription and voice replies.</li>:<li>Your browser’s built-in speech recognition turns speech into text. Depending on your browser, that may use its vendor’s service.</li>}<li>CuraLink doesn’t store raw audio or the full transcript — only details you review in “What CuraLink knows”.</li><li>Nothing spoken is confirmed until you check it. You can switch to text at any time.</li></ul><label className="mt-4 flex items-start gap-3 text-sm"><input type="checkbox" checked={consentChecked} onChange={e=>setConsentChecked(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I agree to use voice for this conversation.</span></label><div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={()=>setConsentOpen(false)}>Keep typing</Button><Button disabled={!consentChecked} onClick={()=>{setConsentOpen(false);void voice.start(history, opening().text).then(()=>qc.invalidateQueries({queryKey:['intake']}))}}>Start voice</Button></div></Card></div>}
   </div>
 }

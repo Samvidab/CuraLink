@@ -35,9 +35,9 @@ def reset_demo(db: Session) -> None:
     # One salted hash reused across demo accounts keeps reset fast; all share the published demo password.
     pw = hash_password(DEMO_PASSWORD)
     for s in users["students"]:
-        db.add(User(id=s["id"], role="student", display_name=s["display_name"], email=s["email"], password_hash=pw, timezone=settings.demo_timezone))
+        db.add(User(id=s["id"], role="student", display_name=s["display_name"], first_name=s["first_name"], last_name=s["last_name"], email=s["email"], password_hash=pw, timezone=settings.demo_timezone))
     for c in users["clinicians"]:
-        db.add(User(id=c["id"], role="clinician", display_name=c["display_name"], email=c["email"], password_hash=pw, credentials=c["credentials"], clinician_verified=c["verified"], timezone=settings.demo_timezone))
+        db.add(User(id=c["id"], role="clinician", display_name=c["display_name"], first_name=c["first_name"], last_name=c["last_name"], email=c["email"], password_hash=pw, credentials=c["credentials"], clinician_verified=c["verified"], timezone=settings.demo_timezone))
     db.flush()
 
     availability.load_demo(db)

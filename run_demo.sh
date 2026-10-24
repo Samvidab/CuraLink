@@ -129,7 +129,7 @@ case "${1:-start}" in
     API_PORT=8011 "$0" stop >/dev/null   # always test the current code, never a stale test server
     sleep 1
     # Blank keys: browser tests must be deterministic and must never spend money on live API calls.
-    ANTHROPIC_API_KEY= CARTESIA_API_KEY= DATABASE_URL="sqlite:///$E2E_DB" API_PORT=8011 WEB_PORT=8454 "$0" start
+    ANTHROPIC_API_KEY= CARTESIA_API_KEY= SESSION_COOKIE_NAME=curalink_session_e2e DATABASE_URL="sqlite:///$E2E_DB" API_PORT=8011 WEB_PORT=8454 "$0" start
     (cd "$ROOT/frontend" && E2E_BASE_URL=http://localhost:8454 npx playwright test "$@")
     ;;
   *) echo "Usage: $0 [start|restart|status|stop|reset|e2e]"; exit 2 ;;

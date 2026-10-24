@@ -48,6 +48,11 @@ class User(Base):
     clinician_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     credentials: Mapped[str | None] = mapped_column(String, nullable=True)
     demo: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Profile names (app/services/names.py). display_name stays the formal name shown to clinicians/students.
+    first_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    preferred_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    clinical_role: Mapped[str | None] = mapped_column(String, nullable=True)  # self-described at sign-up; not a verification
 
 
 class AuthSession(Base):

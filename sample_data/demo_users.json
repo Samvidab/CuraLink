@@ -4,18 +4,24 @@
     {
       "id": "demo-student-1",
       "display_name": "Sam Lee",
+      "first_name": "Sam",
+      "last_name": "Lee",
       "email": "sam.lee@students.example.com",
       "calendar": null
     },
     {
       "id": "demo-student-2",
       "display_name": "Jordan Kim",
+      "first_name": "Jordan",
+      "last_name": "Kim",
       "email": "jordan.kim@students.example.com",
       "calendar": "sample.ics"
     },
     {
       "id": "demo-student-3",
       "display_name": "Taylor Brooks",
+      "first_name": "Taylor",
+      "last_name": "Brooks",
       "email": "taylor.brooks@students.example.com",
       "calendar": null
     }
@@ -24,6 +30,8 @@
     {
       "id": "demo-clinician-1",
       "display_name": "Dr. Avery Rivera",
+      "first_name": "Avery",
+      "last_name": "Rivera",
       "email": "dr.rivera@clinic.example.com",
       "credentials": "MD (fictional)",
       "verified": true,
@@ -48,6 +56,8 @@
     {
       "id": "demo-clinician-2",
       "display_name": "Dr. Morgan Hale",
+      "first_name": "Morgan",
+      "last_name": "Hale",
       "email": "dr.hale@clinic.example.com",
       "credentials": "DO (fictional)",
       "verified": true,
@@ -72,6 +82,8 @@
     {
       "id": "demo-clinician-3",
       "display_name": "Priya Nair, NP",
+      "first_name": "Priya",
+      "last_name": "Nair",
       "email": "p.nair@clinic.example.com",
       "credentials": "NP (fictional)",
       "verified": true,
@@ -89,6 +101,8 @@
     {
       "id": "demo-clinician-unverified",
       "display_name": "Pat Unverified",
+      "first_name": "Pat",
+      "last_name": "Unverified",
       "email": "pending.clinician@clinic.example.com",
       "credentials": null,
       "verified": false

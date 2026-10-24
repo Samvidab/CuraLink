@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { Badge, Button, Card, ErrorBanner, Icon, LoadingBlock, SourceBadge } from '../../components/ui'
 import { useStudentDashboard } from '../../components/StudentShell'
+import { useAuth } from '../../lib/auth'
 import { courseColor } from '../../lib/courseColors'
 import { eventLabel, fmtDateHeading, fmtDay, fmtRange, fmtRelative, fmtTime } from '../../lib/format'
 
@@ -8,6 +9,7 @@ const typeLabel = (t: string) => t.replace(/_/g, ' ').replace(/^\w/, c => c.toUp
 
 export default function Dashboard() {
   const go = useNavigate()
+  const { me } = useAuth()
   const { data, error, isLoading, refetch } = useStudentDashboard()
   if (error) return <ErrorBanner error={error} onRetry={() => refetch()} />
   if (isLoading || !data) return <div className="space-y-5"><LoadingBlock className="h-16"/><LoadingBlock className="h-40"/><LoadingBlock className="h-56"/></div>
@@ -15,7 +17,7 @@ export default function Dashboard() {
   const appt = data.next_appointment
   const colors = Object.fromEntries(data.courses.map(c => [c.code, courseColor(c.color).bg]))
   const titles = Object.fromEntries(data.courses.map(c => [c.code, c.title]))
-  return <><header><p className="text-sm font-semibold text-teal-700">{fmtDateHeading(data.today)}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">Good morning, {data.display_name.split(' ')[0]}!</h1><p className="mt-2 text-slate-500">Here’s how your day is shaping up.</p></header>
+  return <><header><p className="text-sm font-semibold text-teal-700">{fmtDateHeading(data.today)}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">Good morning, {me?.preferred_name || me?.first_name || data.display_name.split(' ')[0]}!</h1><p className="mt-2 text-slate-500">Here’s how your day is shaping up.</p></header>
     <div className="mt-8 grid gap-5 xl:grid-cols-[1.35fr_.65fr]">
       <Card className="overflow-hidden p-6">{appt?<><div className="flex flex-wrap items-start justify-between gap-4"><div><Badge tone="blue">Demo appointment</Badge><h2 className="mt-4 text-xl font-semibold">{typeLabel(appt.appointment_type)}</h2><p className="mt-1 text-slate-500">{fmtDay(appt.starts_at, tz)} · {fmtTime(appt.starts_at, tz)} · {appt.clinician_name ? `${appt.clinician_name}, ` : ''}{appt.clinic_name}</p><p className="mt-1 text-xs text-slate-400">Demo appointment — not booked with a real clinic.</p></div><div className="grid size-12 place-items-center rounded-2xl bg-teal-50 text-teal-700"><Icon name="Find Care" size={24}/></div></div><div className="mt-6 flex flex-wrap gap-3"><Button onClick={()=>go('/student/appointments')}>View appointment</Button><Button variant="secondary" onClick={()=>go('/student/calendar')}>Check schedule</Button></div></>
         :<><div className="flex flex-wrap items-start justify-between gap-4"><div><Badge tone="slate">No appointment yet</Badge><h2 className="mt-4 text-xl font-semibold">Need to see someone?</h2><p className="mt-1 text-slate-500">Compare demo clinic times with your classes, or talk it through first.</p></div><div className="grid size-12 place-items-center rounded-2xl bg-teal-50 text-teal-700"><Icon name="Find Care" size={24}/></div></div><div className="mt-6 flex flex-wrap gap-3"><Button onClick={()=>go('/student/voice')}>Help me coordinate care</Button><Button variant="secondary" onClick={()=>go('/student/appointments')}>Find care</Button></div></>}</Card>

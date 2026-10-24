@@ -48,4 +48,5 @@ def test_delete_calendar(student):
 
 
 def test_profile_update(student):
-    assert student.patch("/api/v1/students/me/profile", json={"display_name": "Sam L."}).json()["display_name"] == "Sam L."
+    out = student.patch("/api/v1/students/me/profile", json={"first_name": "Sam", "last_name": "Lee-Park", "preferred_name": "Sammy"}).json()
+    assert (out["display_name"], out["preferred_name"], out["profile_complete"]) == ("Sam Lee-Park", "Sammy", True)

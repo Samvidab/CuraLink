@@ -87,6 +87,8 @@ No other credentials are needed for the hackathon. Clinic availability, email de
 ### C2. Clinician profiles 🟢
 - **Where:** `sample_data/demo_users.json` (names, credentials, verified flag), loaded by `backend/app/seed.py`; marker `CURALINK_CONFIG: CLINICIAN_CREDENTIALS`. The demo password (`curalink-demo`) is stored only as a scrypt hash.
 - **Test:** `pending.clinician@clinic.example.com` is refused; Dr. Hale can't open Dr. Rivera's patients.
+- **New clinician accounts:** *Request a clinician account* collects first name, last name, credentials and specialty or role, and creates an **unverified** account. An operator verifies it with `uv run python -m app.admin verify-clinician <email>` (run from `backend/`). Nothing typed in a form can grant clinician access. `TODO(CURALINK-MANUAL)`: real license/credential verification.
+- **Names:** student and clinician names live on the account (first, last and preferred name). Older demo databases get missing demo names filled in at startup, and no records are changed.
 
 ### C2b. Clinician availability and appointment lengths 🟢
 - **Where:**

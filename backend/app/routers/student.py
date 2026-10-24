@@ -22,7 +22,7 @@ from app.schemas import (
 )
 from app.routers.auth import me_out
 from app.security import require_student
-from app.services import audit, terms
+from app.services import audit, names, terms
 from app.services.calendar_service import import_calendar
 from app.services.ics_import import validate_upload
 from app.timeutil import local_day_bounds, to_local
@@ -59,7 +59,12 @@ def appointment_summary(appt: Appointment, slot: ClinicSlot, tz: str, db: Sessio
 
 @router.patch("/students/me/profile", response_model=MeOut)
 def update_profile(body: ProfileIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> MeOut:
-    user.display_name = body.display_name.strip()
+    """Names are saved to the SIGNED-IN student's own row (the session decides who; nothing in the body can)."""
+    first, last = names.clean(body.first_name, "first name"), names.clean(body.last_name, "last name")
+    user.first_name, user.last_name = first, last
+    user.preferred_name = names.clean(body.preferred_name, "preferred name", required=False)
+    user.display_name = f"{first} {last}"
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="PROFILE_UPDATED", object_type="user", object_id=user.id)
     db.commit()
     return me_out(user)
 

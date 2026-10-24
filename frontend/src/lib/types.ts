@@ -21,6 +21,11 @@ export interface Me {
   demo: boolean
   credentials: string | null
   permissions: string[]
+  first_name: string | null
+  last_name: string | null
+  preferred_name: string | null
+  clinical_role: string | null
+  profile_complete: boolean
 }
 
 export interface DemoPersona { role: Role; display_name: string; email: string; note: string }

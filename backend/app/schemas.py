@@ -55,10 +55,29 @@ class MeOut(BaseModel):
     demo: bool
     credentials: str | None = None
     permissions: list[str]
+    first_name: str | None = None
+    last_name: str | None = None
+    preferred_name: str | None = None
+    clinical_role: str | None = None
+    profile_complete: bool = False
 
 
 class ProfileIn(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
+    first_name: str = Field(max_length=80)
+    last_name: str = Field(max_length=80)
+    preferred_name: str | None = Field(None, max_length=80)
+
+
+class RegisterIn(BaseModel):
+    email: str = Field(max_length=254)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class ClinicianRegisterIn(RegisterIn):
+    first_name: str = Field(max_length=80)
+    last_name: str = Field(max_length=80)
+    credentials: str = Field(min_length=1, max_length=80)
+    clinical_role: str = Field(min_length=1, max_length=80)
 
 
 class CourseOut(BaseModel):

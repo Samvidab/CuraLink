@@ -23,7 +23,7 @@ from app.schemas import (
     StudentEncounterOut,
 )
 from app.security import require_student
-from app.services import audit, intake_service, llm_gateway
+from app.services import audit, intake_service, llm_gateway, names
 from app.services.intake_fields import FIELD_KEYS, LABELS, FieldError, display, validate
 from app.timeutil import to_local, utcnow
 
@@ -100,6 +100,12 @@ def tool_handler_for(db: Session, user: User):
     handle.last_schedule = None
     handle.sched_type = None
     return handle
+
+
+@router.get("/assistant/greeting")
+def assistant_greeting(user: User = Depends(require_student)) -> dict:
+    """The opening line for Talk to CuraLink, built from the signed-in student's profile (shown and spoken)."""
+    return {"text": names.greeting(user)}
 
 
 @router.post("/intake/sessions", response_model=IntakeSnapshot)

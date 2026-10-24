@@ -57,6 +57,20 @@ class VoiceSession:
         await self.emit("session.started")
         await self._set("LISTENING")
 
+    async def greet(self, text: str) -> None:
+        """Speak the opening greeting (same text the transcript shows) when a conversation starts in voice.
+        Skipped once the student has said anything, so it never interrupts or repeats."""
+        if any(h["role"] == "user" for h in self.history) or self.state not in ("LISTENING", "IDLE"):
+            return
+        async with self._lock:
+            self.turn_version += 1
+            self.turn_id = f"turn_{uuid4().hex[:8]}"
+            if not self.history:
+                self.history = [{"role": "assistant", "text": text}]
+            await self.emit("assistant.greeting", text=text)
+            self._context = f"ctx_{uuid4().hex[:10]}"
+            self._speaking = asyncio.create_task(self._speak(text, self._context, self.turn_version))
+
     async def _forward_partials(self) -> None:
         async for text in self.stt.partials():
             if text:

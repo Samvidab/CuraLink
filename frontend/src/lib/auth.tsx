@@ -1,4 +1,4 @@
-import { createContext, useContext, type PropsWithChildren } from 'react'
+import { createContext, useContext, useState, type PropsWithChildren } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from './api'
 import type { Me, Role } from './types'
@@ -6,8 +6,11 @@ import type { Me, Role } from './types'
 interface AuthState {
   me: Me | null
   loading: boolean
+  /** True after an explicit sign-out: guarded pages send the visitor to the welcome page, not a sign-in form. */
+  signedOut: boolean
   demoLogin: (persona: Role) => Promise<Me>
   login: (email: string, password: string, expectedRole: Role) => Promise<Me>
+  register: (email: string, password: string) => Promise<Me>
   logout: () => Promise<void>
 }
 
@@ -15,6 +18,7 @@ const AuthContext = createContext<AuthState | null>(null)
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const qc = useQueryClient()
+  const [signedOut, setSignedOut] = useState(false)
   const { data, isLoading } = useQuery({
     queryKey: ['me'],
     queryFn: async () => {
@@ -33,14 +37,17 @@ export function AuthProvider({ children }: PropsWithChildren) {
     qc.removeQueries({ predicate: q => q.queryKey[0] !== 'me' })
     qc.setQueryData(['me'], me)
   }
-  const signedIn = (me: Me) => { resetCache(me); return me }
+  const signedIn = (me: Me) => { setSignedOut(false); resetCache(me); return me }
   const value: AuthState = {
     me: data ?? null,
     loading: isLoading,
+    signedOut,
     demoLogin: async persona => signedIn(await api.post<Me>('/auth/demo/login', { persona })),
     login: async (email, password, expectedRole) => signedIn(await api.post<Me>('/auth/login', { email, password, expected_role: expectedRole })),
+    register: async (email, password) => signedIn(await api.post<Me>('/auth/register', { email, password })),
     logout: async () => {
       await api.post('/auth/logout').catch(() => undefined)
+      setSignedOut(true)
       resetCache(null)
     },
   }
