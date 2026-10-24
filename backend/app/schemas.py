@@ -12,7 +12,7 @@ Role = Literal["student", "clinician"]
 class IntegrationStatus(BaseModel):
     clinic_inventory: Literal["demo"] = "demo"
     email_delivery: Literal["test_only"] = "test_only"
-    llm: Literal["live", "fallback"]
+    llm: Literal["live", "fallback", "error"]
     voice: Literal["live", "fallback"]
 
 
@@ -290,6 +290,8 @@ class IntakeSnapshot(BaseModel):
     fields: list[IntakeFieldOut]
     missing_fields: list[str]
     skipped_fields: list[str]
+    conversation_state: str = "GREETING"
+    declined: list[str] = Field(default_factory=list)
 
 
 class ConsentIn(BaseModel):
@@ -307,6 +309,7 @@ class IntakeMessageIn(BaseModel):
     session_id: str | None = None
     message: str = Field(min_length=1, max_length=2000)
     channel: Literal["text", "voice"] = "text"
+    client_turn_id: str | None = Field(None, max_length=64)
     history: list[HistoryItem] = Field(default_factory=list, max_length=20)
 
 
@@ -320,6 +323,9 @@ class IntakeReplyOut(BaseModel):
     field_updates: list[str]
     missing_fields: list[str]
     mode: Literal["claude", "scripted", "safety"]
+    conversation_state: str = "GREETING"
+    form: dict | None = None
+    turn_id: str | None = None
 
 
 class FieldWrite(BaseModel):

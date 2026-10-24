@@ -123,8 +123,19 @@ class LlmUnavailable(Exception):
     """Model not configured, refused, or failed; caller uses the scripted fallback."""
 
 
+# Set when Anthropic rejects the key (401/403); cleared on the next success or API restart.
+STATUS = {"auth_failed": False}
+
+
 def available() -> bool:
-    return bool(get_settings().anthropic_api_key)
+    return bool(get_settings().anthropic_api_key) and not STATUS["auth_failed"]
+
+
+def status() -> str:
+    """live | fallback (no key) | error (key rejected)."""
+    if not get_settings().anthropic_api_key:
+        return "fallback"
+    return "error" if STATUS["auth_failed"] else "live"
 
 
 def _client() -> anthropic.AsyncAnthropic:
@@ -162,6 +173,10 @@ async def run_turn(history: list[dict], user_text: str, context_note: str, handl
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
             )
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+            STATUS["auth_failed"] = True
+            log.warning("anthropic rejected the API key; using scripted fallback until restart")
+            raise LlmUnavailable("auth_failed") from exc
         except anthropic.APIConnectionError as exc:
             raise LlmUnavailable("connection") from exc
         except anthropic.RateLimitError as exc:
@@ -171,6 +186,7 @@ async def run_turn(history: list[dict], user_text: str, context_note: str, handl
             raise LlmUnavailable(f"status_{exc.status_code}") from exc
 
         turn.model = response.model
+        STATUS["auth_failed"] = False
         if response.stop_reason == "refusal":
             raise LlmUnavailable("refusal")
         tool_uses = [b for b in response.content if b.type == "tool_use"]

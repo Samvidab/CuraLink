@@ -189,6 +189,7 @@ class IntakeSession(Base):
     transcription_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     photo_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     skipped_fields: Mapped[list] = mapped_column(JSON, default=list)
+    conversation: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # dialog state (services/dialog.py); no transcript
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

@@ -9,6 +9,7 @@ speech APIs where available and POSTs transcripts to /intake/messages.
 
 import json
 import logging
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
@@ -93,7 +94,7 @@ async def voice_stream(ws: WebSocket) -> None:
 
         async def respond(text: str, history: list[dict]) -> dict:
             current = intake_service.current_session(db, user)
-            reply = await intake_service.handle_message(db, user, current, text, "voice", history, tool_handler_for(db, user))
+            reply = await intake_service.handle_message(db, user, current, text, "voice", history, tool_handler_for(db, user), f"v{uuid4().hex[:10]}")
             return IntakeReplyOut(**reply.__dict__).model_dump()
 
         voice = VoiceSession(sess.id, ws.send_json, respond, stt, tts)

@@ -16,6 +16,9 @@ def _no_live_integrations(monkeypatch):
 
     monkeypatch.setattr(get_settings(), "anthropic_api_key", None)
     monkeypatch.setattr(get_settings(), "cartesia_api_key", None)
+    from app.services import llm_gateway
+
+    monkeypatch.setitem(llm_gateway.STATUS, "auth_failed", False)
 
 
 @pytest.fixture()

@@ -44,6 +44,7 @@ def snapshot(db: Session, sess: IntakeSession) -> IntakeSnapshot:
         session_id=sess.id, status=sess.status, safety_state=sess.safety_state, voice_consent=sess.voice_consent,
         transcription_consent=sess.transcription_consent, photo_consent=sess.photo_consent, fields=[field_out(f) for f in fields],
         missing_fields=intake_service.missing(db, sess), skipped_fields=list(sess.skipped_fields or []),
+        conversation_state=(sess.conversation or {}).get("state", "GREETING"), declined=list((sess.conversation or {}).get("declined", [])),
     )
 
 
@@ -150,7 +151,7 @@ async def message(body: IntakeMessageIn, user: User = Depends(require_student), 
     sess = own_session(db, user, body.session_id) if body.session_id else intake_service.current_session(db, user)
     if body.channel == "voice" and not sess.voice_consent:
         raise ApiError(403, "VOICE_CONSENT_REQUIRED", "Turn on voice consent before sending spoken messages.")
-    reply = await intake_service.handle_message(db, user, sess, body.message, body.channel, [h.model_dump() for h in body.history], tool_handler_for(db, user))
+    reply = await intake_service.handle_message(db, user, sess, body.message, body.channel, [h.model_dump() for h in body.history], tool_handler_for(db, user), body.client_turn_id)
     return IntakeReplyOut(**reply.__dict__)
 
 

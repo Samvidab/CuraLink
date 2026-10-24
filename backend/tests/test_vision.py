@@ -33,7 +33,7 @@ def test_metadata_is_stripped_and_observations_are_tentative():
     assert any("Swelling can't be judged" in l for l in r.limitations)
 
 
-@pytest.mark.parametrize("data,code", [(b"%PDF-1.4 not an image", "UNSUPPORTED_IMAGE"), (b"\x89PNG\r\n\x1a\n" + b"x" * 50, "CORRUPT_IMAGE"), (b"\xff\xd8\xff" + b"0" * (8 * 1024 * 1024 + 1), "IMAGE_TOO_LARGE")])
+@pytest.mark.parametrize("data,code", [(b"%PDF-1.4 not an image", "UNSUPPORTED_IMAGE"), (b"\x89PNG\r\n\x1a\n" + b"x" * 50, "CORRUPT_IMAGE"), (b"\xff\xd8\xff" + b"0" * (12 * 1024 * 1024 + 1), "IMAGE_TOO_LARGE")])
 def test_invalid_images_fail_safely(data, code):
     with pytest.raises(Exception) as exc:
         vision.analyze(data)
@@ -118,3 +118,62 @@ def test_claude_vision_path_is_guarded(student, monkeypatch):
     monkeypatch.setattr(llm_gateway, "describe_image", fake)
     r = student.post("/api/v1/vision/demo-images/red_area?consent=true").json()
     assert r["observer"] == "claude" and [o["category"] for o in r["observations"]] == ["dry_or_flaky_skin"]
+
+
+def _heic(color=(200, 30, 35), size=(400, 300)) -> bytes:
+    import pillow_heif  # noqa: F401  (registers the HEIF encoder)
+
+    img = Image.new("RGB", size, (225, 180, 150))
+    for x in range(size[0] // 3, 2 * size[0] // 3):
+        for y in range(size[1] // 3, 2 * size[1] // 3):
+            img.putpixel((x, y), color)
+    buf = io.BytesIO()
+    img.save(buf, format="HEIF", quality=90)
+    return buf.getvalue()
+
+
+def test_heic_is_detected_by_content_and_converted_to_png():
+    data = _heic()
+    assert data[4:12] == b"ftypheic" and vision.sniff(data) == "image/heic"
+    r = vision.analyze(data)
+    assert r.image_png.startswith(b"\x89PNG") and (r.width, r.height) == (400, 300)
+    assert [o.category for o in r.observations] == ["red_area_possible_blood"]
+
+
+def test_upload_heic_named_like_an_iphone_file(student):
+    r = student.post("/api/v1/vision/observations", files={"file": ("IMG_0042.HEIC", _heic(), "image/heic")}, data={"consent": "true"})
+    assert r.status_code == 200, r.text
+    assert student.get(r.json()["image_url"]).content.startswith(b"\x89PNG")  # converted for preview/clinician
+
+
+def test_type_comes_from_bytes_not_extension(student):
+    png = io.BytesIO()
+    Image.new("RGB", (120, 90), (230, 190, 160)).save(png, format="PNG")
+    ok = student.post("/api/v1/vision/observations", files={"file": ("photo.jpg", png.getvalue(), "image/jpeg")}, data={"consent": "true"})
+    assert ok.status_code == 200  # real PNG with a .jpg name is fine
+    bad = student.post("/api/v1/vision/observations", files={"file": ("photo.heic", b"%PDF-1.7 fake", "image/heic")}, data={"consent": "true"})
+    assert bad.status_code == 422 and bad.json()["code"] == "UNSUPPORTED_IMAGE" and "HEIC" in bad.json()["message"]
+
+
+@pytest.mark.filterwarnings("ignore::PIL.Image.DecompressionBombWarning")
+def test_corrupt_heic_and_oversized_dimensions_fail_safely():
+    with pytest.raises(Exception) as exc:
+        vision.analyze(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 200)
+    assert getattr(exc.value, "code", None) == "CORRUPT_IMAGE"
+    huge = io.BytesIO()
+    Image.new("L", (9000, 6000)).save(huge, format="PNG")
+    with pytest.raises(Exception) as exc:
+        vision.analyze(huge.getvalue())
+    assert getattr(exc.value, "code", None) == "IMAGE_DIMENSIONS"
+
+
+def test_exif_orientation_is_applied_and_gps_removed():
+    img = Image.new("RGB", (300, 100), (225, 180, 150))
+    exif = Image.Exif()
+    exif[0x0112] = 6  # rotate 90° CW on display
+    exif[0x8825] = {2: (40, 25, 0)}
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", exif=exif)
+    r = vision.analyze(buf.getvalue())
+    out = Image.open(io.BytesIO(r.image_png))
+    assert out.size == (100, 300) and not out.getexif()
