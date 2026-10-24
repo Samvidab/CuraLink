@@ -110,22 +110,67 @@ def test_claude_duplicate_reply_is_replaced_and_context_carries_state(student, m
     assert "declined" in seen[-1] and "Do NOT ask" in seen[-1]
 
 
-def test_rejected_key_reports_error_and_stops_calling(student, monkeypatch):
+def _api_error(cls, status, etype, message):
+    import anthropic
+    import httpx2
+
+    resp = httpx2.Response(status, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return getattr(anthropic, cls)(message, response=resp, body={"type": "error", "error": {"type": etype, "message": message}})
+
+
+@pytest.mark.parametrize("cls,status,etype,message,category", [
+    ("AuthenticationError", 401, "authentication_error", "invalid x-api-key", "authentication"),
+    ("BadRequestError", 400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API.", "billing"),
+    ("PermissionDeniedError", 403, "permission_error", "Your API key does not have permission to use the specified resource.", "permission"),
+    ("NotFoundError", 404, "not_found_error", "model: claude-nonexistent", "model_unavailable"),
+    ("RateLimitError", 429, "rate_limit_error", "Number of request tokens has exceeded your rate limit", "rate_limited"),
+    ("InternalServerError", 529, "overloaded_error", "Overloaded", "service_unavailable"),
+])
+def test_anthropic_errors_are_classified(cls, status, etype, message, category):
+    info = llm_gateway.classify(_api_error(cls, status, etype, message + " sk-ant-api03-SECRETSECRET"))
+    assert (info["category"], info["http_status"], info["error_type"]) == (category, status, etype)
+    assert "SECRET" not in info["message"] and "sk-ant-***" in info["message"]
+
+
+def test_connection_errors_are_classified():
+    import anthropic
+    import httpx2
+
+    assert llm_gateway.classify(anthropic.APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com")))["category"] == "connection"
+
+
+def test_rejected_key_reports_reason_pauses_briefly_and_recovers(student, monkeypatch):
     from app.config import get_settings
 
     calls = []
 
     async def rejected(*a, **k):
         calls.append(1)
-        llm_gateway.STATUS["auth_failed"] = True
-        raise llm_gateway.LlmUnavailable("auth_failed")
+        info = llm_gateway._record_failure(_api_error("AuthenticationError", 401, "authentication_error", "invalid x-api-key"))
+        raise llm_gateway.LlmUnavailable(info["category"])
 
     monkeypatch.setattr(get_settings(), "anthropic_api_key", "bad-key")
     monkeypatch.setattr(llm_gateway, "run_turn", rejected)
-    assert say(student, "hello")["mode"] == "scripted"
-    assert student.get("/api/v1/health").json()["integrations"]["llm"] == "error"
-    say(student, "I have a fever")
-    assert len(calls) == 1  # not retried every turn
+    r = say(student, "hello")
+    assert r["mode"] == "scripted" and r["fallback_reason"]["category"] == "authentication" and r["fallback_reason"]["http_status"] == 401
+    h = student.get("/api/v1/health").json()
+    assert h["integrations"]["llm"] == "error" and h["llm_detail"]["category"] == "authentication"
+    assert say(student, "I have a fever")["fallback_reason"]["category"] == "authentication"
+    assert len(calls) == 1  # paused, not retried every turn
+    # A NEW key is tried immediately (the pause is per key).
+    monkeypatch.setattr(get_settings(), "anthropic_api_key", "new-key")
+    assert student.get("/api/v1/health").json()["integrations"]["llm"] == "live"
+
+    async def overloaded(*a, **k):  # transient errors never latch
+        calls.append(1)
+        info = llm_gateway._record_failure(_api_error("InternalServerError", 529, "overloaded_error", "Overloaded"))
+        raise llm_gateway.LlmUnavailable(info["category"])
+
+    monkeypatch.setattr(llm_gateway, "run_turn", overloaded)
+    assert say(student, "since yesterday")["fallback_reason"]["category"] == "service_unavailable"
+    assert say(student, "still sore")["fallback_reason"]["category"] == "service_unavailable"
+    assert len(calls) == 3  # new key tried immediately, and retried each turn after a transient error
+    assert llm_gateway.available() and student.get("/api/v1/health").json()["integrations"]["llm"] == "live"
 
 
 def test_voice_ignores_duplicate_finals_and_marks_interruptions():

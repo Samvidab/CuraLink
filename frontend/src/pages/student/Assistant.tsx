@@ -24,6 +24,18 @@ const ACTIONS: Record<string, { label: string; to?: string }> = {
 }
 // Visible progress through the stateful intake (see backend/app/services/dialog.py).
 const STEPS = ['Your concern', 'A few details', 'Review', 'Next steps']
+// Why Claude wasn't used, from the backend's classified error (never a generic "key rejected").
+const LLM_REASON: Record<string, string> = {
+  authentication: 'Claude API key not accepted (401)',
+  permission: 'Claude access denied for this key (403)',
+  billing: 'Claude billing / credit issue',
+  model_unavailable: 'Claude model unavailable to this key',
+  rate_limited: 'Claude rate limit reached',
+  service_unavailable: 'Claude temporarily unavailable',
+  connection: "Can't reach Claude (network)",
+  refusal: 'Claude declined this request',
+  request_error: 'Claude request error',
+}
 const STEP_OF: Record<string, number> = { GREETING: 0, COLLECTING_INITIAL_CONCERN: 0, CLARIFYING_INFORMATION: 1, OPTIONAL_CONTEXTUAL_INPUT: 1, OFFERING_NEXT_STEPS: 2, REVIEWING_INTAKE: 2, COORDINATING_APPOINTMENT: 3, COMPLETED: 3 }
 
 export default function Assistant() {
@@ -40,6 +52,7 @@ export default function Assistant() {
   const [drawerFocus, setDrawerFocus] = useState<string[] | null>(null)
   const [convState, setConvState] = useState<string>('GREETING')
   const [lastMode, setLastMode] = useState<IntakeReply['mode'] | null>(null)
+  const [fallbackReason, setFallbackReason] = useState<IntakeReply['fallback_reason']>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const openDrawer = (focus: string[] | null) => { setDrawerFocus(focus); setDrawer(true) }
   const [handoff, setHandoff] = useState(false)
@@ -63,7 +76,8 @@ export default function Assistant() {
     if (reply.safety_state === 'EMERGENCY_GUIDANCE') setEmergency({ category: reply.safety_category, text: reply.assistant_message })
     if (reply.field_updates.length || reply.safety_state === 'EMERGENCY_GUIDANCE') qc.invalidateQueries({ queryKey: ['intake'] })
     if (reply.conversation_state) setConvState(reply.conversation_state)
-    if (reply.mode !== 'safety') setLastMode(reply.mode)
+    if (reply.mode !== 'safety') { setLastMode(reply.mode); setFallbackReason(reply.fallback_reason ?? null) }
+    if (reply.mode === 'scripted') qc.invalidateQueries({ queryKey: ['health'] })
     // In voice mode the relevant form opens by itself; voice keeps listening while it's open.
     if (reply.form && voiceRef.current && voiceRef.current.state !== 'IDLE') openDrawer(reply.form.fields)
   }
@@ -129,10 +143,12 @@ export default function Assistant() {
   const liveVoice = health.data?.integrations.voice === 'live'
   const llm = health.data?.integrations.llm
   const claudeLive = llm === 'live' && lastMode !== 'scripted'
-  const llmLabel = claudeLive ? 'Claude · live' : llm === 'error' ? 'Claude key rejected · scripted fallback' : llm === 'live' ? 'Claude unavailable · scripted fallback' : 'Scripted assistant (demo)'
+  const reason = fallbackReason ?? health.data?.llm_detail ?? null
+  const llmLabel = claudeLive ? 'Claude · live' : llm === 'fallback' ? 'Scripted assistant (no Claude key)' : `${LLM_REASON[reason?.category ?? ''] ?? 'Claude unavailable'} · scripted fallback`
+  const llmTitle = reason ? `${reason.error_type ?? reason.category}${reason.http_status ? ` (HTTP ${reason.http_status})` : ''}: ${reason.message}` : undefined
   const step = STEP_OF[convState] ?? 0
 
-  return <div className="grid min-h-[calc(100vh-9rem)] gap-5 xl:grid-cols-[1fr_340px]"><Card className="relative flex min-h-[650px] flex-col overflow-hidden"><div className="border-b border-slate-100 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><div className="grid size-11 place-items-center rounded-xl bg-teal-700 text-white"><Icon name="AI Health Assistant"/></div><div><h1 className="font-semibold">Talk to CuraLink</h1><p className="text-sm text-slate-500">Navigation, not medical advice</p></div></div><div className="flex items-center gap-2"><Badge tone={claudeLive?'teal':'amber'}>{llmLabel}</Badge><Button variant="ghost" className="min-h-9 py-1 text-xs" onClick={startOver}>Start over</Button></div></div>
+  return <div className="grid min-h-[calc(100vh-9rem)] gap-5 xl:grid-cols-[1fr_340px]"><Card className="relative flex min-h-[650px] flex-col overflow-hidden"><div className="border-b border-slate-100 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><div className="grid size-11 place-items-center rounded-xl bg-teal-700 text-white"><Icon name="AI Health Assistant"/></div><div><h1 className="font-semibold">Talk to CuraLink</h1><p className="text-sm text-slate-500">Navigation, not medical advice</p></div></div><div className="flex items-center gap-2"><span title={llmTitle}><Badge tone={claudeLive?'teal':'amber'}>{llmLabel}</Badge></span><Button variant="ghost" className="min-h-9 py-1 text-xs" onClick={startOver}>Start over</Button></div></div>
       <ol className="mt-3 flex gap-1.5" aria-label="Conversation progress">{STEPS.map((label,i)=><li key={label} className="flex-1"><div className={`h-1.5 rounded-full ${i<=step?'bg-teal-600':'bg-slate-200'}`}/><span className={`mt-1 block text-[11px] ${i===step?'font-semibold text-teal-800':'text-slate-400'}`} aria-current={i===step?'step':undefined}>{label}</span></li>)}</ol><p className="mt-3 text-xs text-slate-500">CuraLink helps coordinate care and academic paperwork. It doesn’t diagnose conditions or decide medical urgency.</p></div>
     <div ref={listRef} className="flex-1 space-y-4 overflow-y-auto bg-slate-50/60 p-5" aria-live="polite">{messages.map((m,i)=><div key={i} className={`max-w-[85%] ${m.from==='user'?'ml-auto':''}`}><div className={`rounded-2xl px-4 py-3 text-sm leading-6 ${m.from==='user'?'bg-teal-700 text-white':'border border-slate-200 bg-white text-slate-700'}`}>{m.text}{m.interrupted&&<span className="ml-1 text-xs italic text-slate-400">(interrupted)</span>}</div>{m.tools&&m.tools.length>0&&<div className="mt-2 flex flex-wrap gap-1.5">{m.tools.map((t,j)=><span key={j} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">✓ {t.label}</span>)}</div>}{m.actions&&m.actions.filter(a=>ACTIONS[a]).length>0&&<div className="mt-2 flex flex-wrap gap-2">{m.actions.filter(a=>ACTIONS[a]).map(a=><Button key={a} variant="secondary" className="min-h-9 py-1.5" disabled={busy&&a==='END_CONVERSATION'} onClick={()=>runAction(a,m)}>{ACTIONS[a].label}</Button>)}{m.actions.includes('OFFER_PHOTO')&&i===messages.length-1&&<Button variant="ghost" className="min-h-9 py-1.5" onClick={()=>send('No thanks, no photo')}>No thanks</Button>}</div>}</div>)}{busy&&<div className="w-fit rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500" role="status">Thinking…</div>}{caption&&<div className="ml-auto max-w-[85%] rounded-2xl border border-dashed border-teal-300 px-4 py-3 text-sm italic text-teal-800">{caption}</div>}</div>
     <div className="border-t border-slate-100 p-4"><div className="mb-3 flex gap-2 overflow-x-auto">{PROMPTS.map(p=><button key={p} disabled={busy||!!emergency} onClick={()=>send(p)} className="shrink-0 rounded-full border border-slate-200 px-3 py-2 text-xs font-medium hover:border-teal-300 disabled:opacity-50">{p}</button>)}</div>{error&&<p role="alert" className="mb-2 text-sm text-rose-600">{error}</p>}{convState==='COMPLETED'&&<p className="mb-2 text-xs text-slate-500" role="status">Conversation ended. You can still type to add something, or <button className="font-semibold text-teal-700 underline" onClick={startOver}>start over</button>.</p>}<form className="flex gap-2" onSubmit={e=>{e.preventDefault();send(input)}}><Button variant="secondary" className="shrink-0 px-3" disabled={!!emergency} onClick={()=>openDrawer(['photo'])}><span className="sr-only">Add a photo</span><Icon name="upload" size={18}/></Button><input ref={inputRef} value={input} onChange={e=>setInput(e.target.value)} disabled={!!emergency} className="input" placeholder={emergency?'Paused while safety guidance is shown':'Describe what’s going on, in your own words…'} aria-label="Message"/><Button type="submit" disabled={busy||!!emergency||!input.trim()}>Send</Button></form></div>

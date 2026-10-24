@@ -19,6 +19,7 @@ def _no_live_integrations(monkeypatch):
     from app.services import llm_gateway
 
     monkeypatch.setitem(llm_gateway.STATUS, "auth_failed", False)
+    monkeypatch.setitem(llm_gateway.STATUS, "last_error", None)
 
 
 @pytest.fixture()

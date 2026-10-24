@@ -21,6 +21,7 @@ class Health(BaseModel):
     demo_mode: bool
     demo_today: str
     integrations: IntegrationStatus
+    llm_detail: dict | None = None  # sanitized last Claude failure: category, http_status, error_type, message
 
 
 class DemoResetOut(BaseModel):
@@ -326,6 +327,7 @@ class IntakeReplyOut(BaseModel):
     conversation_state: str = "GREETING"
     form: dict | None = None
     turn_id: str | None = None
+    fallback_reason: dict | None = None  # why Claude wasn't used for this reply (if a key is configured)
 
 
 class FieldWrite(BaseModel):

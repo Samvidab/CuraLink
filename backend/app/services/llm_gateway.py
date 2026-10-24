@@ -123,19 +123,85 @@ class LlmUnavailable(Exception):
     """Model not configured, refused, or failed; caller uses the scripted fallback."""
 
 
-# Set when Anthropic rejects the key (401/403); cleared on the next success or API restart.
-STATUS = {"auth_failed": False}
+# Last Anthropic failure, classified so the UI can say *why* it fell back. Account-level problems
+# (auth/permission/billing) pause calls briefly for the SAME key; transient ones never latch.
+STATUS: dict = {"auth_failed": False, "last_error": None}
+_PAUSE_SECONDS = 120
+_ACCOUNT_LEVEL = {"authentication", "permission", "billing"}
+
+
+def _key_fp() -> str:
+    import hashlib
+
+    return hashlib.sha256((get_settings().anthropic_api_key or "").encode()).hexdigest()[:12]
+
+
+def classify(exc: Exception) -> dict:
+    """Map an SDK exception to {category, http_status, error_type, message}; message has secrets removed."""
+    import re
+    import time
+
+    status_code, etype, msg = None, None, str(exc)
+    if isinstance(exc, anthropic.APIStatusError):
+        status_code = exc.status_code
+        body = exc.body if isinstance(exc.body, dict) else {}
+        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        etype, msg = err.get("type"), err.get("message") or exc.message
+    low = (msg or "").lower()
+    if isinstance(exc, anthropic.APIConnectionError):
+        category = "connection"
+    elif status_code == 401:
+        category = "authentication"
+    elif status_code == 402 or "credit balance" in low or "billing" in low or "payment" in low:
+        category = "billing"
+    elif status_code == 403:
+        category = "permission"
+    elif status_code == 404 or (status_code == 400 and "model" in low and ("not found" in low or "does not exist" in low or "invalid" in low)):
+        category = "model_unavailable"
+    elif status_code == 429:
+        category = "rate_limited"
+    elif status_code in (500, 502, 503, 529) or etype == "overloaded_error":
+        category = "service_unavailable"
+    else:
+        category = "request_error"
+    safe = re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "sk-ant-***", msg or "")[:240]
+    return {"category": category, "http_status": status_code, "error_type": etype, "message": safe, "at": time.time(), "key_fp": _key_fp()}
+
+
+def _record_failure(exc: Exception) -> dict:
+    info = classify(exc)
+    STATUS["last_error"] = info
+    STATUS["auth_failed"] = info["category"] in _ACCOUNT_LEVEL
+    log.warning("anthropic call failed: %s http=%s type=%s", info["category"], info["http_status"], info["error_type"])
+    return info
 
 
 def available() -> bool:
-    return bool(get_settings().anthropic_api_key) and not STATUS["auth_failed"]
+    if not get_settings().anthropic_api_key:
+        return False
+    err = STATUS.get("last_error")
+    if STATUS["auth_failed"] and err and err.get("key_fp") == _key_fp():
+        import time
+
+        if time.time() - err["at"] < _PAUSE_SECONDS:
+            return False  # don't hammer a rejected key; retried automatically after the pause
+    return True
 
 
 def status() -> str:
-    """live | fallback (no key) | error (key rejected)."""
+    """live | fallback (no key) | error (last call failed for an account-level reason)."""
     if not get_settings().anthropic_api_key:
         return "fallback"
-    return "error" if STATUS["auth_failed"] else "live"
+    err = STATUS.get("last_error")
+    return "error" if STATUS["auth_failed"] and err and err.get("key_fp") == _key_fp() else "live"
+
+
+def detail() -> dict | None:
+    """Sanitized last error for /health (no key material)."""
+    err = STATUS.get("last_error")
+    if not err or err.get("key_fp") != _key_fp():
+        return None
+    return {k: err[k] for k in ("category", "http_status", "error_type", "message")}
 
 
 def _client() -> anthropic.AsyncAnthropic:
@@ -173,20 +239,12 @@ async def run_turn(history: list[dict], user_text: str, context_note: str, handl
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
             )
-        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
-            STATUS["auth_failed"] = True
-            log.warning("anthropic rejected the API key; using scripted fallback until restart")
-            raise LlmUnavailable("auth_failed") from exc
-        except anthropic.APIConnectionError as exc:
-            raise LlmUnavailable("connection") from exc
-        except anthropic.RateLimitError as exc:
-            raise LlmUnavailable("rate_limited") from exc
-        except anthropic.APIStatusError as exc:
-            log.warning("llm status error %s", exc.status_code)
-            raise LlmUnavailable(f"status_{exc.status_code}") from exc
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+            info = _record_failure(exc)
+            raise LlmUnavailable(info["category"]) from exc
 
         turn.model = response.model
-        STATUS["auth_failed"] = False
+        STATUS["auth_failed"], STATUS["last_error"] = False, None
         if response.stop_reason == "refusal":
             raise LlmUnavailable("refusal")
         tool_uses = [b for b in response.content if b.type == "tool_use"]
@@ -269,8 +327,8 @@ async def describe_image(png: bytes) -> list[dict]:
                 {"type": "text", "text": VISION_PROMPT},
             ]}],
         )
-    except anthropic.APIError as exc:
-        raise LlmUnavailable("vision_error") from exc
+    except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+        raise LlmUnavailable(_record_failure(exc)["category"]) from exc
     if response.stop_reason == "refusal":
         raise LlmUnavailable("refusal")
     for block in response.content:

@@ -9,6 +9,7 @@ export interface Health {
   demo_mode: boolean
   demo_today: string
   integrations: { clinic_inventory: 'demo'; email_delivery: 'test_only'; llm: 'live' | 'fallback' | 'error'; voice: 'live' | 'fallback' }
+  llm_detail?: LlmError | null
 }
 
 export interface Me {
@@ -194,7 +195,9 @@ export interface IntakeReply {
   conversation_state?: string
   form?: { fields: string[] } | null
   turn_id?: string | null
+  fallback_reason?: LlmError | null
 }
+export interface LlmError { category: string; http_status: number | null; error_type: string | null; message: string }
 export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
 export interface Handoff { packet_id: string; encounter_id: string; version: number; status: string; shared_at: string; field_keys: string[]; attachment_ids: string[] }
 export interface StudentEncounter { id: string; appointment_id: string | null; starts_at: string; visit_type: string; clinician_name: string; status: string; handoff: Handoff | null; source_mode: SourceMode }

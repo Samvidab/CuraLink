@@ -23,6 +23,7 @@ def health() -> Health:
             llm=llm_gateway.status(),
             voice="live" if s.cartesia_api_key else "fallback",
         ),
+        llm_detail=llm_gateway.detail(),
     )
 
 

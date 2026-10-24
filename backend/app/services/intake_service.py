@@ -34,6 +34,7 @@ class Reply:
     conversation_state: str = "GREETING"
     form: dict | None = None  # contextual form to open, e.g. {"fields": ["temperature"]}
     turn_id: str | None = None
+    fallback_reason: dict | None = None
 
 
 def current_session(db: Session, student: User, create: bool = True) -> IntakeSession | None:
@@ -135,6 +136,7 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
     from app.models import Calendar  # local import keeps module import graph simple
 
     has_calendar = db.scalar(select(Calendar.id).where(Calendar.student_id == student.id)) is not None
+    fallback_reason = None
     if llm_gateway.available():
         context = (f"demo date {get_settings().demo_today.isoformat()}; calendar imported: {has_calendar}; channel: {channel}; "
                    + dialog.context_for_model(conv, _field_displays(db, sess)))
@@ -153,6 +155,9 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
             return _remember(db, sess, conv, client_turn_id, reply)
         except llm_gateway.LlmUnavailable as exc:
             audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_FALLBACK", detail=str(exc)[:40])
+            fallback_reason = llm_gateway.detail() or {"category": str(exc), "http_status": None, "error_type": None, "message": ""}
+    elif get_settings().anthropic_api_key:
+        fallback_reason = llm_gateway.detail()  # paused after an account-level error
 
     extracted, notes = extract(text)
     # A short direct answer to "When did this start?" is the onset, in the student's own words.
@@ -166,7 +171,7 @@ async def handle_message(db: Session, student: User, sess: IntakeSession, text: 
     conv["state"] = plan.state
     text_out = _resources(text) if not updated and not plan.pending and plan.state == "COLLECTING_INITIAL_CONCERN" and _resources(text) else plan.text
     text_out = dialog.avoid_repeat(conv, text_out, "Would you like to review your information, find an appointment, or add something else?")
-    reply = Reply(sess.id, text_out, "GENERAL_SUPPORT", None, plan.actions, [], updated, missing(db, sess), "scripted", plan.state, plan.form, turn_id)
+    reply = Reply(sess.id, text_out, "GENERAL_SUPPORT", None, plan.actions, [], updated, missing(db, sess), "scripted", plan.state, plan.form, turn_id, fallback_reason)
     return _remember(db, sess, conv, client_turn_id, reply)
 
 
