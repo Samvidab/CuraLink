@@ -15,7 +15,9 @@ from app.errors import ApiError
 
 MAX_ICS_BYTES = 2 * 1024 * 1024
 DEFAULT_DURATION = timedelta(minutes=50)
-_COURSE_RE = re.compile(r"^\s*([A-Z]{2,5})\s?(\d{3,5})\b(?:\s+(?:LEC|LAB|REC|SD|PSO|LBR)?\s*(\w+))?", re.I)
+# Purdue/UniTime class names look like "CS 18000 Lec 001", "MA 26100 REC 2", "PHYS 17200 Lab".
+_COURSE_RE = re.compile(r"\b([A-Z]{2,5})\s?(\d{3,5}[A-Z]?)\b(?:[\s-]+(?i:(LEC|LAB|REC|SD|PSO|LBR|SEM|STU|IND|DIS|PRA|CLN|EX|LECTURE|LABORATORY|RECITATION))\b)?(?:[\s-]+(\d{1,4}[A-Z]?))?")
+_MAILTO = re.compile(r"^mailto:", re.I)
 
 
 @dataclass
@@ -30,6 +32,9 @@ class Occurrence:
     all_day: bool
     course_code: str | None
     section: str | None
+    title: str | None = None
+    instructors: list[tuple[str | None, str | None]] = field(default_factory=list)  # (name, email) from ORGANIZER/ATTENDEE
+    status: str | None = None
 
 
 @dataclass
@@ -40,11 +45,29 @@ class ParsedCalendar:
     name: str | None = None
 
 
-def parse_course_code(summary: str) -> tuple[str | None, str | None]:
-    m = _COURSE_RE.match(summary or "")
+def parse_course_code(text: str, anywhere: bool = False) -> tuple[str | None, str | None]:
+    """Subject codes are uppercase (CS, MA, PHYS); SUMMARY must start with one, DESCRIPTION may contain one."""
+    m = _COURSE_RE.search(text or "") if anywhere else _COURSE_RE.match((text or "").lstrip())
     if not m:
         return None, None
-    return f"{m.group(1).upper()} {m.group(2)}", m.group(3)
+    return f"{m.group(1)} {m.group(2)}", m.group(4)
+
+
+def _instructors(ev) -> list[tuple[str | None, str | None]]:
+    """UniTime lists instructors as ORGANIZER and/or ATTENDEE (CN=name, mailto:email)."""
+    out: list[tuple[str | None, str | None]] = []
+    for prop in ("ORGANIZER", "ATTENDEE"):
+        vals = ev.get(prop)
+        if vals is None:
+            continue
+        for v in vals if isinstance(vals, list) else [vals]:
+            name = str(v.params.get("CN")).strip('"') if getattr(v, "params", None) and v.params.get("CN") else None
+            email = _MAILTO.sub("", str(v)).strip() or None
+            if email and "@" not in email:
+                email = None
+            if (name or email) and (name, email) not in out:
+                out.append((name, email))
+    return out
 
 
 def _valid_zone(name: str | None) -> str | None:
@@ -95,7 +118,21 @@ def validate_upload(filename: str | None, content_type: str | None, data: bytes)
         raise ApiError(422, "ICS_INVALID", "This file doesn't look like an iCalendar (.ics) file.")
 
 
-def parse_ics(data: bytes, window_start: date, window_end: date, default_tz: str) -> ParsedCalendar:
+def file_window(cal: Calendar, zone: ZoneInfo, span_days: int = 150) -> tuple[date, date] | None:
+    """Expansion window from the file itself: first meeting + one semester."""
+    starts = []
+    for ev in cal.walk("VEVENT"):
+        dt = ev.get("DTSTART")
+        if dt is not None:
+            v = dt.dt
+            starts.append(v.astimezone(zone).date() if isinstance(v, datetime) and v.tzinfo else (v.date() if isinstance(v, datetime) else v))
+    if not starts:
+        return None
+    first = min(starts)
+    return first, first + timedelta(days=span_days)
+
+
+def parse_ics(data: bytes, window_start: date | None, window_end: date | None, default_tz: str) -> ParsedCalendar:
     try:
         cal = Calendar.from_ical(data)
     except Exception as exc:  # icalendar raises a variety of errors
@@ -126,6 +163,9 @@ def parse_ics(data: bytes, window_start: date, window_end: date, default_tz: str
         if count > 1:
             warnings.append(f"Event {uid} appeared {count} times; duplicate copies were ignored.")
 
+    if window_start is None or window_end is None:
+        span = file_window(cal, zone)
+        window_start, window_end = span if span else (date.today(), date.today() + timedelta(days=150))
     start = datetime(window_start.year, window_start.month, window_start.day, tzinfo=zone)
     end = datetime(window_end.year, window_end.month, window_end.day, tzinfo=zone)
     try:
@@ -135,10 +175,14 @@ def parse_ics(data: bytes, window_start: date, window_end: date, default_tz: str
 
     seen: set[tuple[str, datetime]] = set()
     occurrences: list[Occurrence] = []
-    missing_summary = missing_end = 0
+    missing_summary = missing_end = cancelled = 0
     for i, ev in enumerate(expanded):
         dtstart = ev.get("DTSTART")
         if dtstart is None:
+            continue
+        status = str(ev.get("STATUS") or "").upper() or None
+        if status == "CANCELLED":
+            cancelled += 1
             continue
         uid = str(ev.get("UID") or f"no-uid-{i}")
         start_utc, all_day = _to_utc(dtstart.dt, zone)
@@ -161,7 +205,15 @@ def parse_ics(data: bytes, window_start: date, window_end: date, default_tz: str
         if not summary:
             summary = "Untitled event"
             missing_summary += 1
+        description = str(ev.get("DESCRIPTION") or "").strip()
         code, section = parse_course_code(summary)
+        title = None
+        if code is None and description:
+            # UniTime can show the course title as SUMMARY and put "Lec 001"/external id in DESCRIPTION.
+            code, section = parse_course_code(description, anywhere=True)
+            title = summary if code else None
+        elif code and " - " in summary:
+            title = summary.split(" - ", 1)[1].strip() or None
         rid = ev.get("RECURRENCE-ID")
         original = _to_utc(rid.dt, zone)[0] if rid is not None else None
         occurrences.append(
@@ -177,10 +229,15 @@ def parse_ics(data: bytes, window_start: date, window_end: date, default_tz: str
                 all_day=all_day,
                 course_code=code,
                 section=section,
+                title=title,
+                instructors=_instructors(ev),
+                status=status,
             )
         )
     if missing_summary:
         warnings.append(f"{missing_summary} event(s) had no title; review them in your calendar.")
+    if cancelled:
+        warnings.append(f"{cancelled} cancelled meeting(s) in the file were skipped.")
     if missing_end:
         warnings.append(f"{missing_end} event(s) had no end time; we assumed 50 minutes.")
     if not occurrences:

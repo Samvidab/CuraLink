@@ -60,6 +60,7 @@ class ConsentIn(BaseModel):
 
 class ContactIn(BaseModel):
     instructor_email: str = Field(min_length=3, max_length=254)
+    instructor_name: str | None = Field(None, max_length=120)
     confirm: bool
 
 
@@ -233,9 +234,11 @@ def correct_contact(course_id: str, body: ContactIn, user: User = Depends(requir
     if "@" not in email or " " in email or not body.confirm:
         raise ApiError(422, "INVALID_CONTACT", "Enter the instructor's email exactly as published and confirm it.")
     course.instructor_email, course.contact_status, course.provenance = email, "STUDENT_CONFIRMED", "manual"
+    if body.instructor_name and body.instructor_name.strip():
+        course.instructor_name = body.instructor_name.strip()
     audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="CONTACT_CORRECTED", object_type="course", object_id=course.id, detail=course.code)
     db.commit()
-    return {"id": course.id, "code": course.code, "instructor_email": course.instructor_email, "contact_status": course.contact_status, "deliverable": svc.domain_allowed(email)}
+    return {"id": course.id, "code": course.code, "instructor_name": course.instructor_name, "instructor_email": course.instructor_email, "contact_status": course.contact_status, "deliverable": svc.domain_allowed(email)}
 
 
 # ---- clinician --------------------------------------------------------------

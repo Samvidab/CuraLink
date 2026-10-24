@@ -127,3 +127,36 @@ def test_course_code_parsing():
     assert parse_course_code("CS 240 LEC 001 - Programming in C") == ("CS 240", "001")
     assert parse_course_code("MA26100 REC 2") == ("MA 26100", "2")
     assert parse_course_code("Dentist") == (None, None)
+
+
+UNITIME = (get_settings().sample_data_dir / "unitime_format_sample.ics").read_bytes()
+
+
+def test_unitime_format_export():
+    """Fixture follows UniTime's EventsExportEventsToICal output: instructors as ATTENDEE(ROLE=ORGANIZER,CN,mailto),
+    STATUS, RECURRENCE-ID overrides, EXDATE, and course titles as SUMMARY with the class in DESCRIPTION."""
+    parsed = parse_ics(UNITIME, None, None, TZ)  # window derived from the file
+    by_code: dict[str, list] = {}
+    for o in parsed.occurrences:
+        by_code.setdefault(o.course_code, []).append(o)
+    assert set(by_code) == {"CS 18000", "MA 26100"}  # cancelled PHYS lab skipped
+    assert any("cancelled" in w for w in parsed.warnings)
+    cs = by_code["CS 18000"]
+    assert cs[0].instructors == [("Ada Example", "ada.example@example.com")]
+    assert cs[0].section == "001"
+    moved = [o for o in cs if _local(o).date() == date(2026, 10, 27)]
+    assert len(moved) == 1 and (_local(moved[0]).hour, _local(moved[0]).minute) == (13, 0) and moved[0].recurrence_id
+    assert not [o for o in cs if _local(o).date() == date(2026, 11, 26)]  # Thanksgiving EXDATE
+    ma = by_code["MA 26100"][0]
+    assert ma.title == "Multivariate Calculus" and ma.section == "004"
+    assert ma.instructors == [("Grace Sample", None)]  # name only, never an invented email
+
+
+def test_unitime_upload_sets_instructor_provenance(student):
+    r = student.post("/api/v1/calendars/import", files={"file": ("unitime.ics", UNITIME, "text/calendar")}).json()
+    courses = {c["code"]: c for c in r["courses"]}
+    assert courses["CS 18000"]["contact_status"] == "VERIFIED" and courses["CS 18000"]["provenance"] == "unitime_ics"
+    assert courses["MA 26100"]["instructor_name"] == "Grace Sample" and courses["MA 26100"]["instructor_email"] is None
+    assert courses["MA 26100"]["contact_status"] == "NEEDS_REVIEW" and courses["MA 26100"]["title"] == "Multivariate Calculus"
+    fixed = student.patch(f"/api/v1/courses/{courses['MA 26100']['id']}/contact", json={"instructor_email": "grace.sample@example.com", "instructor_name": "Dr. Grace Sample", "confirm": True}).json()
+    assert fixed["instructor_name"] == "Dr. Grace Sample" and fixed["contact_status"] == "STUDENT_CONFIRMED"

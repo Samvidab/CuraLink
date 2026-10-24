@@ -19,8 +19,8 @@ def term_window(today: date) -> tuple[date, date]:
 
 def import_calendar(db: Session, student: User, data: bytes, *, filename: str | None, source_mode: str) -> tuple[Calendar, ParsedCalendar]:
     settings = get_settings()
-    start, end = term_window(settings.demo_today)
-    parsed = parse_ics(data, start, end, default_tz=student.timezone or settings.demo_timezone)
+    # Expand over the file's own term (first meeting + ~one semester), so real exports for any term work.
+    parsed = parse_ics(data, None, None, default_tz=student.timezone or settings.demo_timezone)
 
     # One active calendar per student in the MVP: replace the previous import.
     db.execute(delete(CalendarEvent).where(CalendarEvent.student_id == student.id))
@@ -41,22 +41,33 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
 
     courses: dict[str, Course] = dict(manual)
     for occ in parsed.occurrences:
-        if occ.course_code and occ.course_code not in courses:
-            entry = catalog.lookup(occ.course_code)
-            course = Course(
-                id=f"crs_{uuid4().hex[:10]}",
-                student_id=student.id,
-                code=occ.course_code,
-                section=occ.section,
-                title=(entry or {}).get("title") or occ.summary.split(" - ", 1)[-1],
-                instructor_name=(entry or {}).get("instructor_name"),
-                instructor_email=(entry or {}).get("instructor_email"),
-                contact_status=(entry or {}).get("contact_status", "MISSING"),
-                provenance="demo_catalog" if entry else "ics",
-                color=(entry or {}).get("color") or _FALLBACK_COLORS[len(courses) % len(_FALLBACK_COLORS)],
-            )
-            db.add(course)
-            courses[occ.course_code] = course
+        if not occ.course_code or occ.course_code in courses:
+            continue
+        entry = catalog.lookup(occ.course_code)
+        # Instructor data from the student's own UniTime export wins over the demo catalog.
+        instr = next((i for o in parsed.occurrences if o.course_code == occ.course_code for i in o.instructors), None)
+        if instr:
+            name, email = instr
+            status, provenance = ("VERIFIED" if email else "NEEDS_REVIEW"), "unitime_ics"
+        elif entry:
+            name, email, status, provenance = entry.get("instructor_name"), entry.get("instructor_email"), entry.get("contact_status", "MISSING"), "demo_catalog"
+        else:
+            name, email, status, provenance = None, None, "MISSING", "ics"
+        title = occ.title or (entry or {}).get("title") or (occ.summary.split(" - ", 1)[1] if " - " in occ.summary else None)
+        course = Course(
+            id=f"crs_{uuid4().hex[:10]}",
+            student_id=student.id,
+            code=occ.course_code,
+            section=occ.section,
+            title=title,
+            instructor_name=name,
+            instructor_email=email,
+            contact_status=status,
+            provenance=provenance,
+            color=(entry or {}).get("color") or _FALLBACK_COLORS[len(courses) % len(_FALLBACK_COLORS)],
+        )
+        db.add(course)
+        courses[occ.course_code] = course
     db.flush()
 
     for occ in parsed.occurrences:
