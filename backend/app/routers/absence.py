@@ -114,6 +114,15 @@ def _timeline(db: Session, case: AbsenceCase) -> list[dict]:
     return [{"event_type": a.action, "actor": a.actor_role, "to_state": a.to_state, "status": a.status, "at": a.at, "detail": a.detail} for a in rows]
 
 
+def _metrics(timeline: list[dict], case: AbsenceCase) -> dict:
+    """Measured from this case's own audit log (not an estimate): request -> delivery time and student effort."""
+    sent = next((t["at"] for t in timeline if t["event_type"] == "DELIVERY_SENT"), None)
+    return {
+        "request_to_delivery_seconds": round((sent - case.created_at).total_seconds()) if sent else None,
+        "student_actions": sum(1 for t in timeline if t["actor"] == "student"),
+    }
+
+
 def _version_out(v: DocumentVersion | None, include_content: bool) -> dict | None:
     if v is None:
         return None
@@ -137,8 +146,9 @@ def student_case_out(db: Session, case: AbsenceCase) -> dict:
         "disclosure_consent": case.disclosure_consent and case.consent_revoked_at is None, "consent_revoked_at": case.consent_revoked_at,
         "decision": {"decision": d.decision, "start_date": d.start_date, "end_date": d.end_date} if d else None,
         "document": {"version": v.version, "state": v.state, "signed_at": v.signed_at} if v else None,
-        "deliveries": _deliveries(db, case.id), "timeline": _timeline(db, case), "created_at": case.created_at,
+        "deliveries": _deliveries(db, case.id), "timeline": (tl := _timeline(db, case)), "created_at": case.created_at,
         "excused_status": "UNKNOWN — decided by your university",
+        "metrics": _metrics(tl, case),
     }
 
 

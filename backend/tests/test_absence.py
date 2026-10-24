@@ -219,3 +219,8 @@ def test_dashboard_still_works_after_contact_correction(student, case):
     r = student.get("/api/v1/students/me/dashboard")
     assert r.status_code == 200
     assert {c["code"]: c["contact_status"] for c in r.json()["courses"]}["PHIL 208"] == "STUDENT_CONFIRMED"
+
+
+def test_case_metrics_are_measured_from_audit_log(student, case):
+    m = student.get("/api/v1/students/me/cases").json()[0]["metrics"]
+    assert m["request_to_delivery_seconds"] is None and m["student_actions"] >= 1

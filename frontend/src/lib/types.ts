@@ -203,6 +203,7 @@ export interface StudentCase {
   decision: { decision: 'CERTIFY' | 'DECLINE'; start_date: string | null; end_date: string | null } | null
   document: { version: number; state: string; signed_at: string | null } | null
   deliveries: DeliveryRow[]; timeline: TimelineItem[]; created_at: string; excused_status: string
+  metrics: { request_to_delivery_seconds: number | null; student_actions: number }
 }
 export interface DraftMessage extends Recipient { subject: string; body: string; include: boolean }
 export interface DocVersion { id: string; version: number; state: 'UNSIGNED' | 'SIGNED' | 'SUPERSEDED' | 'REVOKED'; unsigned_sha256: string; signed_sha256: string | null; signed_at: string | null; created_at: string; content: { start_date: string; end_date: string; wording: string; courses: { code: string; dates: string[] }[]; days: ImpactDay[]; messages: DraftMessage[] } }

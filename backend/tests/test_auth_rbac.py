@@ -87,3 +87,21 @@ def test_seeded_times_keep_local_wall_clock(clinician):
     """Regression: aware non-UTC datetimes must be stored as UTC, not as local wall time."""
     rows = {e["id"]: e for e in clinician.get("/api/v1/clinician/encounters").json()}
     assert rows["enc_jordan_1"]["starts_at"] == "2026-10-26T09:00:00-04:00"
+
+
+def test_existing_database_gets_new_columns_without_data_loss(tmp_path):
+    from sqlalchemy import create_engine, text
+
+    from app import db as dbmod
+
+    url = f"sqlite:///{tmp_path / 'old.db'}"
+    eng = create_engine(url)
+    with eng.begin() as c:  # simulate an older schema with data in it
+        c.execute(text("CREATE TABLE handoff_packets (id VARCHAR PRIMARY KEY, encounter_id VARCHAR, session_id VARCHAR, version INTEGER, field_snapshot JSON, status VARCHAR, student_approved_at DATETIME, clinician_viewed_at DATETIME, withdrawn_at DATETIME, source_mode VARCHAR)"))
+        c.execute(text("INSERT INTO handoff_packets (id, version, status) VALUES ('pkt_old', 1, 'SHARED')"))
+    dbmod.configure(url)
+    dbmod.create_all()
+    with dbmod.engine().begin() as c:
+        cols = [r[1] for r in c.execute(text("PRAGMA table_info(handoff_packets)"))]
+        assert "attachment_ids" in cols
+        assert c.execute(text("SELECT id FROM handoff_packets")).scalar() == "pkt_old"

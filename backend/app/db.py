@@ -44,6 +44,21 @@ def create_all() -> None:
     from app import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(engine())
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Additive-only upgrade for existing demo databases: add new columns as nullable.
+    Never drops or rewrites data (code treats NULL as the column's default)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine())
+    with engine().begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name not in existing:
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine().dialect)}'))
 
 
 def drop_all() -> None:
