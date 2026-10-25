@@ -64,6 +64,51 @@ def domain_allowed(email: str | None) -> bool:
     return any(domain == d or domain.endswith("." + d) for d in get_settings().allowlisted_domains)
 
 
+# ---- recipient status: three separate questions, never one boolean --------------------------------------------
+#   1. contact:  is this instructor's address confirmed? (VERIFIED from an authoritative source, or STUDENT_CONFIRMED)
+#   2. route:    may the DEMO deliver it?  direct (address is itself a test address) / isolated test inbox (real-looking
+#                address, simulated, never contacted) / not permitted
+#   3. gates:    consent, signature validity and recipient set are separate case-level checks (delivery_readiness)
+CONTACT_STATE = {"VERIFIED": "VERIFIED", "STUDENT_CONFIRMED": "CONFIRMED_BY_STUDENT", "NEEDS_REVIEW": "STUDENT_CONFIRMATION_MISSING"}
+CONTACT_LABEL = {"VERIFIED": "Verified from an official source", "CONFIRMED_BY_STUDENT": "Confirmed by student",
+                 "STUDENT_CONFIRMATION_MISSING": "Student confirmation missing", "EMAIL_MISSING": "Recipient email missing",
+                 "EMAIL_UNVERIFIED": "Recipient email unverified", "EMAIL_CHANGED_AFTER_SIGNING": "Email changed after signing"}
+ROUTE_LABEL = {"DIRECT_TEST_ADDRESS": "Test address — deliverable", "ISOLATED_TEST_INBOX": "Simulated: isolated test inbox (real address not contacted)",
+               "NOT_PERMITTED_FOR_DEMO": "Recipient not permitted for demo delivery", "NO_ADDRESS": "No address on file"}
+
+
+def contact_state(status: str | None, email: str | None) -> str:
+    if not email:
+        return "EMAIL_MISSING"
+    return CONTACT_STATE.get(status or "", "EMAIL_UNVERIFIED")
+
+
+def demo_alias(course_code: str) -> str:
+    slug = "".join(ch for ch in course_code.lower() if ch.isalnum()) or "course"
+    return f"{slug}.instructor@{get_settings().demo_inbox_domain}"
+
+
+def demo_route(email: str | None, course_code: str) -> str:
+    if not email:
+        return "NO_ADDRESS"
+    if domain_allowed(email):
+        return "DIRECT_TEST_ADDRESS"
+    if get_settings().demo_inbox_redirect and get_settings().email_delivery_mode == "test_inbox" and domain_allowed(demo_alias(course_code)):
+        return "ISOLATED_TEST_INBOX"
+    return "NOT_PERMITTED_FOR_DEMO"
+
+
+def _recipient_fields(course_code: str, email: str | None, status: str | None) -> dict:
+    contact = contact_state(status, email)
+    route = demo_route(email, course_code)
+    contact_ok = contact in ("VERIFIED", "CONFIRMED_BY_STUDENT")
+    reason = None if contact_ok else CONTACT_LABEL[contact]
+    if reason is None and route == "NOT_PERMITTED_FOR_DEMO":
+        reason = ROUTE_LABEL[route]
+    return {"contact_state": contact, "contact_label": CONTACT_LABEL[contact], "demo_route": route, "route_label": ROUTE_LABEL[route],
+            "deliverable": reason is None, "blocked_reason": reason}
+
+
 def recipients(db: Session, student_id: str, impact: Impact) -> list[dict]:
     term = terms.selected(db, db.get(User, student_id))
     courses = {c.code: c for c in db.scalars(select(Course).where(Course.student_id == student_id, (Course.term == term) | Course.term.is_(None) if term else True))}
@@ -72,16 +117,22 @@ def recipients(db: Session, student_id: str, impact: Impact) -> list[dict]:
         c = courses.get(ci.course_code)
         email = c.instructor_email if c else None
         status = c.contact_status if c else "MISSING"
-        reason = None
-        if status not in DELIVERABLE_CONTACT:
-            reason = "Contact needs review" if status == "NEEDS_REVIEW" else "Contact needed"
-        elif not domain_allowed(email):
-            reason = "Not on the demo test allowlist"
         out.append({
             "course_id": c.id if c else None, "course_code": ci.course_code, "course_title": c.title if c else None,
             "instructor_name": c.instructor_name if c else None, "email": email, "contact_status": status,
-            "deliverable": reason is None, "blocked_reason": reason, "dates": ci.dates, "meetings": len(ci.meetings),
+            **_recipient_fields(ci.course_code, email, status), "dates": ci.dates, "meetings": len(ci.meetings),
         })
+    return out
+
+
+def course_contacts(db: Session, student: User) -> list[dict]:
+    """Selected-term courses in the same shape as recipients (no dates): contact status the student can fix."""
+    term = terms.selected(db, student)
+    rows = db.scalars(select(Course).where(Course.student_id == student.id, (Course.term == term) | Course.term.is_(None) if term else True).order_by(Course.code)).all()
+    out = []
+    for c in rows:
+        out.append({"course_id": c.id, "course_code": c.code, "course_title": c.title, "instructor_name": c.instructor_name, "email": c.instructor_email,
+                    "contact_status": c.contact_status, **_recipient_fields(c.code, c.instructor_email, c.contact_status), "dates": [], "meetings": 0})
     return out
 
 
@@ -242,7 +293,8 @@ class TestInboxTransport:
         if cls.fail_next > 0:
             cls.fail_next -= 1
             raise RuntimeError("TRANSPORT_UNAVAILABLE")
-        msg = TestInboxMessage(id=f"msg_{uuid4().hex[:10]}", delivery_id=d.id, to=d.destination, subject=subject, body=body, attachment_name="attendance-verification-DEMO.pdf", attachment_sha256=attachment_sha)
+        msg = TestInboxMessage(id=f"msg_{uuid4().hex[:10]}", delivery_id=d.id, to=d.destination, subject=subject, body=body, attachment_name="attendance-verification-DEMO.pdf",
+                               attachment_sha256=attachment_sha, intended_recipient=d.intended_recipient)
         db.add(msg)
         return msg.id
 
@@ -251,21 +303,83 @@ class TestInboxTransport:
 # Every send requires ALL of: student disclosure consent (re-checked at send time), the latest SIGNED version with
 # an intact hash, recipients unchanged since signing, and each recipient VERIFIED/STUDENT_CONFIRMED and inside
 # TEST_EMAIL_ALLOWLIST. No configuration flag disables these checks.
+BLOCKER_STATUS = {"STUDENT_CONSENT_MISSING": 409, "NOT_SIGNED": 409, "DOCUMENT_CHANGED_AFTER_SIGNING": 409, "RECIPIENTS_CHANGED_AFTER_SIGNING": 409,
+                  "STUDENT_CONFIRMATION_MISSING": 409, "RECIPIENT_EMAIL_UNVERIFIED": 409, "RECIPIENT_NOT_PERMITTED_FOR_DEMO": 409}
+
+
+def delivery_readiness(db: Session, case: AbsenceCase, version: DocumentVersion | None) -> dict:
+    """ONE computation used by the delivery gate, the clinician portal and the student portal, from persisted
+    records only: case consent, the signed version + its authorization, and the student's current course contacts.
+    Each problem has its own code; none of them is reported as another."""
+    blockers: list[dict] = []
+    consent = bool(case.disclosure_consent and case.consent_revoked_at is None)
+    if not consent:
+        blockers.append({"code": "STUDENT_CONSENT_MISSING", "message": "The student hasn't consented to sending (or withdrew consent). Nothing will be sent."})
+    signed, auth = False, None
+    if version is None or version.state != "SIGNED":
+        blockers.append({"code": "NOT_SIGNED", "message": "No signed version yet. The clinician must approve and sign before anything can be sent."})
+    else:
+        latest = latest_version(db, case.id)
+        auth = db.scalar(select(SignAuthorization).where(SignAuthorization.version_id == version.id))
+        intact = auth is not None and auth.document_sha256 == version.unsigned_sha256 and pdf_builder.sha256(version.signed_pdf or b"") == version.signed_sha256
+        if latest is None or latest.id != version.id or not intact:
+            blockers.append({"code": "DOCUMENT_CHANGED_AFTER_SIGNING", "message": "The document changed after it was signed. Review, regenerate and sign the current version."})
+        elif auth.approved_destinations_hash != destinations_hash(destinations(version)):
+            blockers.append({"code": "RECIPIENTS_CHANGED_AFTER_SIGNING", "message": "The recipients differ from the ones the clinician signed for. Generate and sign a new version."})
+        else:
+            signed = True
+    courses = {c.id: c for c in db.scalars(select(Course).where(Course.student_id == case.student_id))}
+    recips = []
+    for m in (version.content["messages"] if version else []):
+        if not m.get("include", True):
+            continue
+        c = courses.get(m.get("course_id") or "")
+        email, status = m.get("email"), (c.contact_status if c else m.get("contact_status"))
+        fields = _recipient_fields(m["course_code"], email, status)
+        if c is not None and email and (c.instructor_email or "").lower() != email.lower():
+            # The signature covers this exact address: a different current address needs a new signed version.
+            fields.update(contact_state="EMAIL_CHANGED_AFTER_SIGNING", contact_label=CONTACT_LABEL["EMAIL_CHANGED_AFTER_SIGNING"], deliverable=False,
+                          blocked_reason="Instructor email changed after signing — generate and sign a new version")
+        recips.append({"course_code": m["course_code"], "course_id": m.get("course_id"), "course_title": m.get("course_title"), "instructor_name": m.get("instructor_name"), "email": email,
+                       "deliver_to": (email if fields["demo_route"] == "DIRECT_TEST_ADDRESS" else demo_alias(m["course_code"]) if fields["demo_route"] == "ISOLATED_TEST_INBOX" else None),
+                       **fields})
+    def courses_where(pred):
+        return [r["course_code"] for r in recips if pred(r)]
+    missing = courses_where(lambda r: r["contact_state"] in ("STUDENT_CONFIRMATION_MISSING", "EMAIL_MISSING"))
+    if missing:
+        no_email = courses_where(lambda r: r["contact_state"] == "EMAIL_MISSING")
+        parts = [f"confirm the instructor email for {', '.join(c for c in missing if c not in no_email)}" if len(no_email) < len(missing) else "",
+                 f"add and confirm an instructor email for {', '.join(no_email)}" if no_email else ""]
+        blockers.append({"code": "STUDENT_CONFIRMATION_MISSING", "courses": missing, "message": "The student still needs to " + " and ".join(p for p in parts if p) + "."})
+    unverified = courses_where(lambda r: r["contact_state"] == "EMAIL_UNVERIFIED")
+    if unverified:
+        blockers.append({"code": "RECIPIENT_EMAIL_UNVERIFIED", "courses": unverified, "message": f"No verified instructor email for {', '.join(unverified)}."})
+    changed = courses_where(lambda r: r["contact_state"] == "EMAIL_CHANGED_AFTER_SIGNING")
+    if changed:
+        blockers.append({"code": "RECIPIENTS_CHANGED_AFTER_SIGNING", "courses": changed, "message": f"Instructor email changed after signing for {', '.join(changed)}. Generate and sign a new version."})
+    not_permitted = courses_where(lambda r: r["demo_route"] == "NOT_PERMITTED_FOR_DEMO" and r["contact_state"] in ("VERIFIED", "CONFIRMED_BY_STUDENT"))
+    if not_permitted:
+        blockers.append({"code": "RECIPIENT_NOT_PERMITTED_FOR_DEMO", "courses": not_permitted, "message": f"Demo delivery isn't permitted for {', '.join(not_permitted)} (not a test address, and the isolated test inbox is off)."})
+    rows = db.scalars(select(Delivery).where(Delivery.case_id == case.id, Delivery.version_id == version.id)).all() if version else []
+    failed = [d.course_code for d in rows if d.state == "FAILED"]
+    sent = bool(rows) and all(d.state == "SENT" for d in rows)
+    return {
+        "clinician_signed": signed, "signed_version": version.version if version and version.state == "SIGNED" else None,
+        "student_consent": consent,
+        "contacts_confirmed": bool(recips) and all(r["contact_state"] in ("VERIFIED", "CONFIRMED_BY_STUDENT") for r in recips),
+        "recipients": recips,
+        "blockers": blockers + ([{"code": "DELIVERY_FAILED", "courses": failed, "message": f"Delivery failed for {', '.join(failed)}. Retry is available; nothing was marked delivered."}] if failed else []),
+        "ready": not blockers and not sent, "delivered": sent,
+        "uses_isolated_test_inbox": any(r["demo_route"] == "ISOLATED_TEST_INBOX" for r in recips),
+    }
+
+
 def check_delivery_gates(db: Session, case: AbsenceCase, version: DocumentVersion) -> SignAuthorization:
-    if not case.disclosure_consent or case.consent_revoked_at is not None:
-        raise ApiError(409, "STUDENT_CONSENT_MISSING", "The student hasn't consented to sending (or withdrew consent). Nothing will be sent.")
-    latest = latest_version(db, case.id)
-    if version.state != "SIGNED" or latest is None or latest.id != version.id:
-        raise ApiError(409, "NOT_SIGNED", "Only the latest signed version can be sent.")
-    auth = db.scalar(select(SignAuthorization).where(SignAuthorization.version_id == version.id))
-    if auth is None or auth.document_sha256 != version.unsigned_sha256 or pdf_builder.sha256(version.signed_pdf or b"") != version.signed_sha256:
-        raise ApiError(409, "AUTHORIZATION_INVALID", "The signature authorization doesn't match this document.")
-    if auth.approved_destinations_hash != destinations_hash(destinations(version)):
-        raise ApiError(409, "RECIPIENTS_CHANGED", "Recipients changed after signing. Generate and sign a new version.")
-    blocked = [m["course_code"] for m in version.content["messages"] if m["include"] and not m["deliverable"]]
-    if blocked:
-        raise ApiError(409, "RECIPIENT_NOT_VERIFIED", f"Verify instructor contacts first: {', '.join(blocked)}.", details={"courses": blocked})
-    return auth
+    readiness = delivery_readiness(db, case, version)
+    for b in readiness["blockers"]:
+        if b["code"] in BLOCKER_STATUS:
+            raise ApiError(BLOCKER_STATUS[b["code"]], b["code"], b["message"], details={"courses": b.get("courses", [])})
+    return db.scalar(select(SignAuthorization).where(SignAuthorization.version_id == version.id))
 
 
 def deliver(db: Session, case: AbsenceCase, version: DocumentVersion, actor: User, idempotency_key: str) -> list[Delivery]:
@@ -273,15 +387,22 @@ def deliver(db: Session, case: AbsenceCase, version: DocumentVersion, actor: Use
     transport()  # refuse up front if no supported delivery mode is configured
     out: list[Delivery] = []
     for dest in auth.approved_destinations:
+        # The clinician signed for these instructors; in the demo, a real-looking address is never contacted:
+        # the copy goes to the isolated test inbox under a fictional alias (transport routing only, so the signed
+        # document and the signed recipient list are unchanged).
+        to = dest["email"] if demo_route(dest["email"], dest["course_code"]) == "DIRECT_TEST_ADDRESS" else demo_alias(dest["course_code"])
+        intended = None if to == dest["email"] else dest["email"]
         # Idempotent per (version, destination): repeats return the existing row.
-        d = db.scalar(select(Delivery).where(Delivery.version_id == version.id, Delivery.destination == dest["email"]))
+        d = db.scalar(select(Delivery).where(Delivery.version_id == version.id, Delivery.destination == to))
         if d is None:
-            d = Delivery(id=f"dlv_{uuid4().hex[:10]}", case_id=case.id, version_id=version.id, course_code=dest["course_code"], destination=dest["email"], idempotency_key=idempotency_key)
+            d = Delivery(id=f"dlv_{uuid4().hex[:10]}", case_id=case.id, version_id=version.id, course_code=dest["course_code"], destination=to, intended_recipient=intended, idempotency_key=idempotency_key)
             db.add(d)
             db.flush()
         out.append(d)
     case.status = "DELIVERY_QUEUED"
-    audit.record(db, actor_role=actor.role, actor_id=actor.id, subject_student_id=case.student_id, action="DELIVERY_QUEUED", object_type="absence_case", object_id=case.id, to_state="DELIVERY_QUEUED", detail=f"{len(out)} recipients, test_only")
+    redirected = sum(1 for d in out if d.intended_recipient)
+    audit.record(db, actor_role=actor.role, actor_id=actor.id, subject_student_id=case.student_id, action="DELIVERY_QUEUED", object_type="absence_case", object_id=case.id, to_state="DELIVERY_QUEUED",
+                 detail=f"{len(out)} recipients, test_only" + (f", {redirected} to isolated test inbox (real addresses not contacted)" if redirected else ""))
     db.flush()
     process(db, case, version)
     return out

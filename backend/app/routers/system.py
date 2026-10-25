@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+import hmac
+
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,7 +34,20 @@ def _demo_only() -> None:
         raise ApiError(404, "NOT_FOUND", "Not available.", recoverable=False)
 
 
-@router.post("/demo/reset", response_model=DemoResetOut, dependencies=[Depends(_demo_only)])
+def demo_admin(request: Request) -> None:
+    """Destructive demo controls (reset, simulated other bookings, forced failures). Open only on a laptop;
+    a public deployment uses DEMO_CONTROLS=token (header X-CuraLink-Admin) or off. Same 404 either way."""
+    s = get_settings()
+    _demo_only()
+    if s.demo_controls == "open":
+        return
+    supplied = request.headers.get("X-CuraLink-Admin", "")
+    if s.demo_controls == "token" and s.demo_admin_token and hmac.compare_digest(supplied, s.demo_admin_token):
+        return
+    raise ApiError(404, "NOT_FOUND", "Not available.", recoverable=False)
+
+
+@router.post("/demo/reset", response_model=DemoResetOut, dependencies=[Depends(demo_admin)])
 def demo_reset(db: Session = Depends(get_db)) -> DemoResetOut:
     reset_demo(db)
     return DemoResetOut(student_id="demo-student-1")

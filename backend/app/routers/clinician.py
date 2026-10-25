@@ -70,7 +70,20 @@ def dashboard(user: User = Depends(require_clinician), db: Session = Depends(get
             if c.status not in ("SENT", "REJECTED", "REVOKED")
         ),
         encounters=[_row(e, u, user.timezone) for e, u in rows],
+        previsit_notes=_notes_overview(db, user, rows),
     )
+
+
+def _notes_overview(db: Session, user: User, rows: list[tuple[Encounter, User]]) -> list[dict]:
+    """Which assigned appointments have approved pre-visit notes (counts and times only; content stays on the case page)."""
+    out = []
+    for enc, student in rows:
+        shared = [p for p in previsit.visible_packets(db, user, student.id) if p.status == "SHARED" and p.encounter_id == enc.id]
+        if shared:
+            latest = max(shared, key=lambda p: p.student_approved_at)
+            out.append({"encounter_id": enc.id, "student_name": student.display_name, "appointment_at": to_local(enc.starts_at, user.timezone),
+                        "sessions": len({p.session_id for p in shared}), "latest_submitted_at": to_local(latest.student_approved_at, user.timezone)})
+    return sorted(out, key=lambda x: x["latest_submitted_at"], reverse=True)
 
 
 @router.get("/encounters", response_model=list[EncounterRow])
@@ -86,7 +99,7 @@ def encounter_detail(encounter_id: str, user: User = Depends(require_clinician),
     base = _row(enc, student, user.timezone).model_dump()
     appt = db.get(Appointment, enc.appointment_id) if enc.appointment_id else None
     slot = db.get(ClinicSlot, appt.slot_id) if appt else None
-    base.update(purpose=appt.purpose if appt else None, absence_requested=bool(appt and appt.absence_requested),
+    base.update(purpose=appt.purpose if appt else None, purpose_confirmed=bool(appt and appt.purpose_confirmed), absence_requested=bool(appt and appt.absence_requested),
                 ends_at=to_local(slot.ends_at, user.timezone) if slot else None, location=f"{slot.clinic_name}{', ' + slot.location if slot.location else ''}" if slot else None)
     return EncounterDetail(**base, student_id=student.id, student_email=student.email, appointment_id=enc.appointment_id)
 

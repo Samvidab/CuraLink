@@ -156,6 +156,7 @@ class Appointment(Base):
     intake_session_id: Mapped[str | None] = mapped_column(ForeignKey("intake_sessions.id"), nullable=True)
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
     absence_requested: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    purpose_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # entered/confirmed by the student (older rows: NULL)
 
 
 class Encounter(Base):
@@ -267,8 +268,12 @@ class AbsenceCase(Base):
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     encounter_id: Mapped[str] = mapped_column(ForeignKey("encounters.id"))
     status: Mapped[str] = mapped_column(String, default="STUDENT_REQUESTED")
-    requested_start: Mapped[date] = mapped_column(Date)
-    requested_end: Mapped[date] = mapped_column(Date)
+    # LEGACY: older student requests carried a date range. Students no longer choose dates; these stay only so
+    # old rows remain readable (shown as "student-reported", never as certified). Certified dates live ONLY in
+    # ClinicianAbsenceDecision, which only the assigned clinician's routes can write.
+    requested_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requested_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    reported_missed_dates: Mapped[list | None] = mapped_column(JSON, nullable=True)  # student-reported class absences (factual)
     student_note: Mapped[str | None] = mapped_column(Text, nullable=True)  # clinician-only; never in professor messages
     origin: Mapped[str | None] = mapped_column(String, nullable=True)  # student | clinician (NULL = student, older rows)
     disclosure_consent: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -370,6 +375,7 @@ class Delivery(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     receipt_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    intended_recipient: Mapped[str | None] = mapped_column(String, nullable=True)  # the instructor's real address: display only, never contacted
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -387,6 +393,7 @@ class TestInboxMessage(Base):
     body: Mapped[str] = mapped_column(Text)
     attachment_name: Mapped[str] = mapped_column(String)
     attachment_sha256: Mapped[str] = mapped_column(String)
+    intended_recipient: Mapped[str | None] = mapped_column(String, nullable=True)  # who this simulates; NOT contacted
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

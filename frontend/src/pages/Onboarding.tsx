@@ -5,6 +5,7 @@ import { Badge, Button, Icon } from '../components/ui'
 import { useAuth } from '../lib/auth'
 import { api, ApiError } from '../lib/api'
 import type { CalendarImport, Me } from '../lib/types'
+import { Logo } from '../components/Logo'
 
 // Steps: 0 role selection · 1 profile · 2 calendar import · 3 done · 4 clinician sign-in · 5 student sign-in
 type ImportState = 'idle' | 'dragging' | 'uploading' | 'success' | 'error'
@@ -81,7 +82,7 @@ export default function Onboarding({ initialStep = 0 }: { initialStep?: 0 | 1 | 
   return <main className="min-h-screen bg-[#f5faf9] p-5 text-slate-900">
     <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-xl">
       <aside className="hidden w-[38%] flex-col justify-between bg-[#0c2f3b] p-12 text-white md:flex">
-        <div><div className="mb-16 flex items-center gap-3"><div className="grid size-10 place-items-center rounded-xl bg-teal-400 text-[#0c2f3b] font-black">C</div><span className="text-xl font-bold">CuraLink</span></div>
+        <div><div className="mb-16 flex items-center gap-3"><Logo size={48}/><span className="text-xl font-bold">CuraLink</span></div>
           <p className="text-sm font-semibold text-teal-300">BUILT FOR CAL HACKS 13.0</p>
           <h1 className="mt-4 text-4xl font-semibold leading-tight">Campus care, coordinated around your life.</h1>
           <p className="mt-5 max-w-sm leading-7 text-slate-300">Navigate student health resources, compare care with your classes, and communicate absences with confidence.</p>
@@ -89,6 +90,7 @@ export default function Onboarding({ initialStep = 0 }: { initialStep?: 0 | 1 | 
         <p className="text-sm text-slate-400">Private by design. No university password required.</p>
       </aside>
       <div className="flex flex-1 flex-col p-7 md:p-12">
+        <div className="mb-6 flex items-center gap-3 md:hidden"><Logo size={44}/><span className="text-lg font-bold">CuraLink</span></div>
         <div className="mb-10 flex gap-2" aria-label={step===4?'Clinician sign in':step===5?'Student sign in':`Onboarding step ${step + 1} of 4`}>{[0,1,2,3].map(i=><div key={i} className={`h-1.5 flex-1 rounded-full ${step>=4||i<=step?'bg-teal-600':'bg-slate-200'}`}/>)}</div>
         <div className="my-auto mx-auto w-full max-w-lg">
           {step===0 && <><Badge>Choose your portal</Badge><h2 className="mt-5 text-4xl font-semibold tracking-tight">Welcome to CuraLink</h2>{me&&<div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-teal-200 bg-teal-50 p-3 text-sm text-teal-900" role="status"><span>You’re still signed in as <b>{me.display_name}</b>.</span><span className="flex gap-2"><Button className="min-h-9 py-1" onClick={()=>navigate(me.role==='student'&&!me.profile_complete?'/student/onboarding':`/${me.role}/dashboard`)}>Continue as {me.preferred_name || me.first_name || me.display_name}</Button><Button variant="secondary" className="min-h-9 py-1" onClick={()=>void logout()}>Sign out</Button></span></div>}<p className="mt-4 text-lg leading-7 text-slate-600">Sign in to the workspace built for your role. This selection is for the fictional demo only.</p><div className="mt-8 grid gap-4 sm:grid-cols-2"><button onClick={()=>navigate('/student/sign-in')} className="rounded-2xl border-2 border-slate-200 p-5 text-left transition hover:border-teal-500 hover:bg-teal-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-teal-200 disabled:opacity-60"><div className="grid size-11 place-items-center rounded-xl bg-teal-100 font-bold text-teal-800">S</div><h3 className="mt-4 font-semibold">I'm a student</h3><p className="mt-1 text-sm leading-5 text-slate-500">Coordinate care, classes, and cases.</p></button><button onClick={()=>navigate('/clinician/sign-in')} className="rounded-2xl border-2 border-slate-200 p-5 text-left transition hover:border-sky-500 hover:bg-sky-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sky-200"><div className="grid size-11 place-items-center rounded-xl bg-sky-100 font-bold text-sky-800">MD</div><h3 className="mt-4 font-semibold">I'm a healthcare professional</h3><p className="mt-1 text-sm leading-5 text-slate-500">Sign in to the clinician demo portal.</p></button></div>{error&&<p role="alert" className="mt-4 text-sm text-rose-600">{error}</p>}<p className="mt-5 text-center text-xs text-slate-400">Role selection is presentation only; the server decides what each account can access. Choosing “healthcare professional” does not prove clinician status.</p></>}

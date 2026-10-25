@@ -19,6 +19,7 @@ export function SummaryBody({ s, photoUrl }: { s: PreVisitSummary; photoUrl: (at
     <Row label="Measurements">{s.measurements.length?s.measurements.map(m=><span key={m.key} className="block">{m.label}: <b>{m.display}</b> <span className="text-xs text-slate-500">· {m.source}</span></span>):<span className="text-slate-500">{s.not_known.includes('Temperature')?'Temperature: not measured / not known':s.declined.includes('Temperature')?'Temperature: declined':'Not provided'}</span>}</Row>
     {s.other.map(o=><Row key={o.key} label={o.label}>{o.display}</Row>)}
     <Row label="Photos">{s.photos.length?<div className="space-y-2">{s.photos.map(p=><figure key={p.attachment_id} className="rounded-lg border border-slate-200 bg-white p-2"><img src={photoUrl(p.attachment_id)} alt={`Student-approved photo${p.synthetic_demo?' (synthetic demo image)':''}`} className="max-h-48 w-full rounded object-contain"/><figcaption className="mt-1 text-xs text-slate-600"><Badge tone="amber">AI-generated observation</Badge> {p.observer==='claude'?'Claude vision':'Basic colour analysis'} — non-diagnostic: {p.observations.map(o=>`${CATEGORY[o.category] ?? o.category}: ${o.description}`).join(' ')||'nothing clear enough to describe'}</figcaption></figure>)}</div>:<span className="text-slate-500">None shared</span>}</Row>
+    {(s.follow_ups?.length ?? 0)>0&&<Row label="Follow-up answers"><ul className="space-y-0.5">{s.follow_ups!.map(f=><li key={f.key}><span className="text-slate-500">{f.question}</span> {f.answer}</li>)}</ul></Row>}
     <Row label="Reason for visit">{s.reason_for_visit ?? <span className="text-slate-500">Not shared</span>}</Row>
     <Row label="Absence documentation"><Badge tone={s.absence_documentation==='REQUESTED'?'amber':'slate'}>{ABSENCE[s.absence_documentation]}</Badge></Row>
     {(s.not_known.length>0||s.declined.length>0)&&<Row label="Not provided">{[...s.not_known.map(x=>`${x} (student didn’t know)`),...s.declined.map(x=>`${x} (declined)`)].join(' · ')}</Row>}
@@ -41,9 +42,9 @@ function SessionCard({ s, latest, photoUrl }: { s: HistorySession; latest: boole
 
 /** Chronological, per-session history: grouped by the local date each conversation started, newest first. */
 export function PreVisitHistoryView({ data, studentName, photoUrl }: { data: PreVisitHistory; studentName: string; photoUrl: (id: string) => string }) {
-  return <section aria-labelledby="history-title"><h2 id="history-title" className="text-lg font-semibold">AI-Assisted Pre-Visit History — {studentName}</h2>
+  return <section aria-labelledby="history-title"><h3 id="history-title" className="text-base font-semibold">AI-Assisted Pre-Visit History — {studentName}</h3>
     <p className="mt-1 text-xs text-slate-500">Separate conversations are never merged. Older entries are historical and may not describe current symptoms.</p>
     {data.groups.length===0?<p className="mt-3 text-sm text-slate-500">No approved pre-visit summaries for your appointments with this student.</p>:
-    <div className="mt-3 space-y-4">{data.groups.map(g=><div key={g.date}><h3 className="text-sm font-semibold text-slate-700">{fmtDay(`${g.date}T12:00:00Z`,undefined,{month:'long',day:'numeric',year:'numeric'})}</h3><ul className="mt-2 space-y-2">{g.sessions.map(s=><SessionCard key={s.session_id} s={s} latest={s.session_id===data.latest_session_id} photoUrl={photoUrl}/>)}</ul></div>)}</div>}
+    <div className="mt-3 space-y-4">{data.groups.map(g=><div key={g.date}><h4 className="text-sm font-semibold text-slate-700">{fmtDay(`${g.date}T12:00:00Z`,undefined,{month:'long',day:'numeric',year:'numeric'})}</h4><ul className="mt-2 space-y-2">{g.sessions.map(s=><SessionCard key={s.session_id} s={s} latest={s.session_id===data.latest_session_id} photoUrl={photoUrl}/>)}</ul></div>)}</div>}
   </section>
 }

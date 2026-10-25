@@ -105,6 +105,9 @@ export interface AppointmentSummary {
   ends_at: string
   source_mode: SourceMode
   external_booking: boolean
+  purpose?: string | null
+  purpose_confirmed?: boolean
+  absence_requested?: boolean
 }
 
 export interface StudentDashboard {
@@ -130,6 +133,7 @@ export interface EncounterRow {
 }
 
 export interface ClinicianDashboard {
+  previsit_notes?: { encounter_id: string; student_name: string; appointment_at: string; sessions: number; latest_submitted_at: string }[]
   today: string
   display_name: string
   appointments_today: number
@@ -165,6 +169,7 @@ export interface IntakeSnapshot {
   absence_requested?: boolean
   summary?: SummaryStatus | null
   linked_encounter_id?: string | null
+  suggested_appointment_type?: string | null
 }
 export interface TranscriptItem { from: 'user' | 'ai'; text: string; at: string; channel?: string; actions?: string[]; form?: { fields: string[] } | null; had_schedule?: boolean }
 /** Student-reported pre-visit summary of ONE conversation (backend services/previsit.py). Never a diagnosis. */
@@ -173,9 +178,9 @@ export interface PreVisitSummary {
   measurements: { key: string; label: string; value: number | null; unit: string | null; display: string; source: string }[]
   other: { key: string; label: string; display: string }[]
   photos: { attachment_id: string; observer: string; synthetic_demo: boolean; ai_generated: boolean; observations: PhotoAttachment['observations']; limitations: string[] }[]
-  not_known: string[]; declined: string[]; reason_for_visit: string | null; absence_documentation: 'REQUESTED' | 'NOT_REQUESTED' | 'NOT_SHARED'; disclaimer: string
+  not_known: string[]; declined: string[]; follow_ups?: { key: string; question: string; answer: string }[]; reason_for_visit: string | null; absence_documentation: 'REQUESTED' | 'NOT_REQUESTED' | 'NOT_SHARED'; disclaimer: string
 }
-export interface SummaryStatus { packet_id: string; version: number; status: 'SHARED' | 'SUPERSEDED' | 'WITHDRAWN'; shared_at: string; encounter_id: string | null; clinician_name: string | null; appointment_at: string | null; field_keys: string[]; attachment_ids: string[]; summary: PreVisitSummary }
+export interface SummaryStatus { packet_id: string; version: number; status: 'SHARED' | 'SUPERSEDED' | 'WITHDRAWN'; shared_at: string; encounter_id: string | null; appointment_cancelled?: boolean; session_id?: string; started_at?: string; clinician_name: string | null; appointment_at: string | null; field_keys: string[]; attachment_ids: string[]; summary: PreVisitSummary }
 export interface HistorySession {
   session_id: string; label: string; started_at: string; ended_at: string | null; local_date: string; status: string; status_label: string; version: number; packet_id: string; submitted_at: string
   versions: { version: number; status: string; submitted_at: string }[]; consent_text: string | null; summary: PreVisitSummary | null
@@ -205,32 +210,34 @@ export interface Handoff { packet_id: string; encounter_id: string | null; sessi
 export interface StudentEncounter { id: string; appointment_id: string | null; starts_at: string; visit_type: string; clinician_name: string; status: string; handoff: Handoff | null; source_mode: SourceMode }
 export interface ClinicianIntake { encounter_id: string; status: 'NOT_SHARED' | 'SHARED' | 'WITHDRAWN'; packet_id: string | null; version: number | null; shared_at: string | null; fields: IntakeField[]; consent: Record<string, boolean>; attachments: PhotoAttachment[]; annotations: Record<string, { decision: 'accepted' | 'corrected' | 'rejected'; corrected_value: string | null; note: string | null; at: string }>; summary?: PreVisitSummary | null; consent_text?: string | null; session?: { session_id: string; started_at: string | null; ended_at: string | null; intake_complete: boolean; version: number } | null }
 
-export interface Recipient { course_id: string | null; course_code: string; course_title: string | null; instructor_name: string | null; email: string | null; contact_status: ContactStatus | 'STUDENT_CONFIRMED'; deliverable: boolean; blocked_reason: string | null; dates: string[]; meetings: number }
+export interface Recipient { course_id: string | null; course_code: string; course_title: string | null; instructor_name: string | null; email: string | null; contact_status: ContactStatus | 'STUDENT_CONFIRMED'; deliverable: boolean; blocked_reason: string | null; dates: string[]; meetings: number; contact_state?: string; contact_label?: string; demo_route?: string; route_label?: string }
 export interface ImpactDay { date: string; weekday: string; weekend: boolean; meeting_count: number }
 export interface Impact { start_date: string; end_date: string; days: ImpactDay[]; total_meetings: number; courses: { course_code: string; course_id: string | null; dates: string[]; meetings: { event_id: string; date: string; start_local: string; end_local: string; minutes: number }[] }[]; recipients: Recipient[] }
-export interface DeliveryRow { id: string; course_code: string; destination: string; state: 'QUEUED' | 'SENT' | 'FAILED' | 'CANCELLED'; attempts: number; error_code: string | null; receipt_id: string | null; sent_at: string | null; version_id: string }
+export interface DeliveryRow { id: string; course_code: string; destination: string; intended_recipient?: string | null; simulated?: boolean; state: 'QUEUED' | 'SENT' | 'FAILED' | 'CANCELLED'; attempts: number; error_code: string | null; receipt_id: string | null; sent_at: string | null; version_id: string }
 export interface TimelineItem { event_type: string; actor: string; to_state: string | null; status: string; at: string; detail: string | null }
 export interface StudentCase {
   id: string; status: string; status_label: string; origin: 'student' | 'clinician'; encounter_id: string; visit_type: string; appointment_at: string; clinician_name: string
-  requested_start: string; requested_end: string; disclosure_consent: boolean; consent_revoked_at: string | null
+  reported_missed_dates: string[]; legacy_requested_range: { start: string; end: string } | null; disclosure_consent: boolean; consent_revoked_at: string | null
   decision: { decision: 'CERTIFY' | 'DECLINE' | 'DEFER'; start_date: string | null; end_date: string | null } | null
   document: { version: number; state: string; signed_at: string | null } | null
   deliveries: DeliveryRow[]; timeline: TimelineItem[]; created_at: string; excused_status: string
+  delivery?: DeliveryReadiness
   metrics: { request_to_delivery_seconds: number | null; student_actions: number }
 }
 export interface DraftMessage extends Recipient { subject: string; body: string; include: boolean }
 export interface DocVersion { id: string; version: number; state: 'UNSIGNED' | 'SIGNED' | 'SUPERSEDED' | 'REVOKED'; unsigned_sha256: string; signed_sha256: string | null; signed_at: string | null; created_at: string; content: { start_date: string; end_date: string; wording: string; courses: { code: string; dates: string[] }[]; days: ImpactDay[]; messages: DraftMessage[] } }
 export interface ClinicianCase {
   id: string; status: string; status_label: string; origin: 'student' | 'clinician'; encounter_id: string; visit_type: string; appointment_at: string; student_name: string
-  requested_start: string; requested_end: string; student_note: string | null
+  reported_missed_dates: string[]; legacy_requested_range: { start: string; end: string } | null; student_note: string | null
   decision: { decision: 'CERTIFY' | 'DECLINE' | 'DEFER'; start_date: string | null; end_date: string | null; wording: string | null; rationale_private: string | null; version: number } | null
   impact: Impact | null; document: DocVersion | null; signature_asset: { id: string; kind: string; created_at: string } | null
   gates: { student_consent: boolean; signed: boolean; recipients_verified: boolean }
+  delivery?: DeliveryReadiness
   deliveries: DeliveryRow[]; timeline: TimelineItem[]
 }
-export interface ClinicianCaseRow { id: string; student_name: string; encounter_id: string; visit_type: string; status: string; status_label: string; requested_start: string; requested_end: string; created_at: string }
+export interface ClinicianCaseRow { id: string; student_name: string; encounter_id: string; visit_type: string; status: string; status_label: string; reported_missed_dates: string[]; legacy_requested_range: { start: string; end: string } | null; created_at: string }
 export interface SignRequest { nonce: string; expires_at: string; document_sha256: string; version: number; recipients: { course_code: string; email: string }[]; start_date: string; end_date: string }
-export interface InboxMessage { id: string; to: string; subject: string; body: string; attachment_name: string; attachment_sha256: string; received_at: string }
+export interface InboxMessage { id: string; to: string; intended_recipient?: string | null; subject: string; body: string; attachment_name: string; attachment_sha256: string; received_at: string }
 
 export interface PhotoObservation { category: string; description: string; uncertainty: string }
 export interface PhotoAttachment {
@@ -256,3 +263,10 @@ export interface ScheduleResult {
   alternatives: { same_clinician: ScheduleSlot[]; other_clinicians: ScheduleSlot[] }; calendar_considered: boolean; term: string | null; source_mode: SourceMode
 }
 export interface ClinicianListing { clinicians: ClinicianCardData[]; appointment_types: { id: string; label: string }[]; specialties: string[] }
+
+/** Shared by both portals (backend absence_service.delivery_readiness): each problem is its own code. */
+export interface DeliveryRecipient { course_code: string; course_id: string | null; course_title: string | null; instructor_name: string | null; email: string | null; deliver_to: string | null; contact_state: string; contact_label: string; demo_route: string; route_label: string; deliverable: boolean; blocked_reason: string | null }
+export interface DeliveryReadiness {
+  clinician_signed: boolean; signed_version: number | null; student_consent: boolean; contacts_confirmed: boolean; recipients: DeliveryRecipient[]
+  blockers: { code: string; message: string; courses?: string[] }[]; ready: boolean; delivered: boolean; uses_isolated_test_inbox: boolean
+}

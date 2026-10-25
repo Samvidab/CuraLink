@@ -159,6 +159,9 @@ class AppointmentSummary(BaseModel):
     starts_at: datetime
     ends_at: datetime
     source_mode: SourceMode | str
+    purpose: str | None = None
+    purpose_confirmed: bool = False
+    absence_requested: bool = False
     external_booking: bool = False
 
 
@@ -185,6 +188,7 @@ class EncounterRow(BaseModel):
 
 
 class ClinicianDashboard(BaseModel):
+    previsit_notes: list[dict] = Field(default_factory=list)
     today: str
     display_name: str
     appointments_today: int
@@ -197,7 +201,8 @@ class EncounterDetail(EncounterRow):
     student_id: str
     student_email: str
     appointment_id: str | None
-    purpose: str | None = None  # student's stated reason, verbatim (detail view only; list rows stay symptom-free)
+    purpose: str | None = None  # student's stated reason (detail view only; list rows stay symptom-free)
+    purpose_confirmed: bool = False  # False for older bookings whose purpose wasn't confirmed by the student
     absence_requested: bool = False  # requested by the student; never an approval
     ends_at: datetime | None = None
     location: str | None = None
@@ -248,6 +253,7 @@ class IntakeSnapshot(BaseModel):
     absence_requested: bool = False
     summary: dict | None = None  # latest submitted pre-visit summary for this session (status, version, sharing target)
     linked_encounter_id: str | None = None  # appointment booked from this conversation, if any
+    suggested_appointment_type: str | None = None  # from what the conversation is about; the student can change it
 
 
 class ConsentIn(BaseModel):

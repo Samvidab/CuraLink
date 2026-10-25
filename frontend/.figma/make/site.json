@@ -1,4 +1,5 @@
 {
+  "title": "CuraLink",
   "description": "CuraLink helps college students find campus healthcare, coordinate appointments with class schedules, and create professor absence drafts with accessible AI voice and chat support.",
   "robots": {
     "index": false
@@ -6,5 +7,8 @@
   "accessibility": {
     "addBypassLinks": false,
     "ignoreReducedMotion": false
+  },
+  "icons": {
+    "icon": "/CuraLinkLogo2.png"
   }
 }

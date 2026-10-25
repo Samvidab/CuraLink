@@ -18,7 +18,7 @@ from app.db import get_db
 from app.errors import ApiError
 from app.models import Appointment, Calendar, CalendarEvent, ClinicianProfile, ClinicSlot, Course, Encounter, IntakeField, IntakeSession, User
 from app.routers.student import appointment_summary
-from app.routers.system import _demo_only
+from app.routers.system import demo_admin
 from app.schemas import AppointmentSummary, BlockIn, CalendarEventOut, SchedulePreferences
 from app.security import require_student
 from app.services import audit, availability, previsit, scheduling, terms
@@ -48,6 +48,7 @@ class ConfirmIn(BaseModel):
     intake_session_id: str | None = None  # the conversation this booking came from (default: the open one, if it has content)
     purpose: str | None = Field(None, max_length=300)  # student's own words; never inferred symptoms
     absence_requested: bool | None = None  # student wants to DISCUSS absence documentation; not an approval
+    share_summary_ids: list[str] = Field(default_factory=list, max_length=10)  # approved summaries whose earlier appointment was cancelled, re-shared with explicit consent
 
 
 def _now() -> datetime:
@@ -191,16 +192,23 @@ def confirm(body: ConfirmIn, user: User = Depends(require_student), db: Session 
         raise ApiError(409, "CLASS_CONFLICT", "This time overlaps with your schedule or another appointment. Pick another option.", details={"conflicts": [c.label.removeprefix("Personal: ") for c in conflicts]})
     sess = _booking_session(db, user, body.intake_session_id)
     slot = availability.book(db, cand, profile)
-    purpose = (body.purpose or "").strip() or (sess.purpose if sess else None)
+    # Only what the student confirmed in the booking dialog; a conversation's suggestion is never copied silently.
+    purpose = (body.purpose or "").strip() or None
     absence = body.absence_requested if body.absence_requested is not None else bool(sess and sess.absence_requested)
     appt = Appointment(id=f"apt_{uuid4().hex[:10]}", student_id=user.id, slot_id=slot.id, clinician_id=cand.clinician_id, appointment_type=cand.appointment_type, state="DEMO_CONFIRMED",
-                       confirmation_mode="demo", idempotency_key=body.idempotency_key, intake_session_id=sess.id if sess else None, purpose=purpose, absence_requested=absence)
+                       confirmation_mode="demo", idempotency_key=body.idempotency_key, intake_session_id=sess.id if sess else None, purpose=purpose, absence_requested=absence, purpose_confirmed=bool(purpose))
     db.add(appt)
     db.flush()
     enc = Encounter(id=f"enc_{uuid4().hex[:10]}", student_id=user.id, clinician_id=cand.clinician_id, appointment_id=appt.id, starts_at=cand.starts_at, visit_type=TYPE_LABEL.get(cand.appointment_type, cand.appointment_type), status="UPCOMING")
     db.add(enc)
     db.flush()
     attached = previsit.attach_pending(db, user.id, enc)  # summaries the student approved "for the clinician I book next"
+    allowed = {p.id for p in previsit.reshareable(db, user.id)}
+    for pid in dict.fromkeys(body.share_summary_ids):
+        if pid not in allowed:
+            raise ApiError(422, "UNKNOWN_SUMMARY", "One of the selected summaries can't be shared with this appointment.")
+        previsit.reshare(db, user, pid, enc)
+        attached += 1
     audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DEMO_CONFIRMED", object_type="appointment", object_id=appt.id, from_state="OFFERED", to_state="DEMO_CONFIRMED",
                  detail=f"clinician {cand.clinician_id}; case {enc.id}" + (f"; session {sess.id}" if sess else "") + ("; absence documentation requested" if absence else "") + (f"; {attached} summaries attached" if attached else ""))
     db.commit()
@@ -222,13 +230,34 @@ def _confirm_out(db: Session, appt: Appointment, tz: str, message: str) -> dict:
     slot = db.get(ClinicSlot, appt.slot_id)
     enc = db.scalar(select(Encounter).where(Encounter.appointment_id == appt.id))
     return {"appointment_id": appt.id, "status": appt.state, "external_booking": False, "appointment": appointment_summary(appt, slot, tz, db).model_dump(), "message": message,
-            "case_id": enc.id if enc else None, "intake_session_id": appt.intake_session_id, "purpose": appt.purpose, "absence_requested": bool(appt.absence_requested)}
+            "case_id": enc.id if enc else None, "intake_session_id": appt.intake_session_id, "purpose": appt.purpose, "purpose_confirmed": bool(appt.purpose_confirmed), "absence_requested": bool(appt.absence_requested)}
 
 
 @router.get("/appointments/me", response_model=list[AppointmentSummary])
 def my_appointments(user: User = Depends(require_student), db: Session = Depends(get_db)) -> list[AppointmentSummary]:
     rows = db.execute(select(Appointment, ClinicSlot).join(ClinicSlot).where(Appointment.student_id == user.id).order_by(ClinicSlot.starts_at)).all()
     return [appointment_summary(a, s, user.timezone, db) for a, s in rows]
+
+
+class AppointmentEditIn(BaseModel):
+    purpose: str | None = Field(None, max_length=300)
+    absence_requested: bool | None = None
+
+
+@router.patch("/appointments/{appointment_id}")
+def edit_appointment(appointment_id: str, body: AppointmentEditIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
+    """The student corrects their own reason for visit / absence-documentation request. Type and time change only by
+    rebooking (they decide duration and availability)."""
+    appt = db.get(Appointment, appointment_id)
+    if appt is None or appt.student_id != user.id or appt.state != "DEMO_CONFIRMED":
+        raise ApiError(404, "NOT_FOUND", "Appointment not found.")
+    if body.purpose is not None:
+        appt.purpose, appt.purpose_confirmed = body.purpose.strip() or None, bool(body.purpose.strip())
+    if body.absence_requested is not None:
+        appt.absence_requested = body.absence_requested
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DETAILS_UPDATED", object_type="appointment", object_id=appt.id)
+    db.commit()
+    return _confirm_out(db, appt, user.timezone, "Updated.")
 
 
 @router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentSummary)
@@ -280,7 +309,7 @@ class OtherBookingIn(BaseModel):
     slot_id: str
 
 
-@router.post("/demo/book-as-other", dependencies=[Depends(_demo_only)])
+@router.post("/demo/book-as-other", dependencies=[Depends(demo_admin)])
 def book_as_other(body: OtherBookingIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
     """Demo control: another (fictional) student books this exact time, to show stale-slot recovery."""
     cand, profile = availability.validate(db, body.slot_id, _now())

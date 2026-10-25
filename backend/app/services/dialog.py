@@ -84,13 +84,38 @@ def describes_concern(text: str) -> bool:
 
 
 def note_context(conv: dict, text: str) -> None:
-    """Record, in the student's own words, the first concern and any stated reason for a visit. Never inferred."""
+    """Record the first concern in the student's own words, whether they asked about absence documentation, and a
+    SHORT SUGGESTED reason for the visit. The suggestion is never a raw transcript fragment and never a diagnosis;
+    it only becomes the appointment's purpose when the student confirms or edits it in the booking dialog."""
     if describes_concern(text) and not conv.get("chief_concern"):
         conv["chief_concern"] = text.strip()[:300]
     if ABSENCE.search(text):
         conv["absence_requested"] = True
-    if ABSENCE.search(text) or APPOINTMENT.search(text) or re.search(r"\b(check-?up|physical)\b", text, re.I):
-        conv["purpose"] = text.strip()[:300]
+    if ABSENCE.search(text) or APPOINTMENT.search(text) or describes_concern(text) or re.search(r"\b(check-?up|physical)\b", text, re.I):
+        conv["purpose"] = suggest_purpose(conv, text)
+
+
+def suggest_purpose(conv: dict, text: str = "") -> str | None:
+    """A concise, non-diagnostic description built from what the conversation is about (not what was said verbatim)."""
+    parts = []
+    for t, rx in TYPE_WORDS:
+        if rx.search(text) or (conv.get("sched") or {}).get("appointment_type") == t:
+            parts.append({"vaccination": "Vaccination", "mental_health": "Mental health support", "routine_checkup": "Routine checkup"}[t])
+            break
+    if not parts and "symptom" in conv.get("concerns", []):
+        parts.append("Visit about symptoms I reported")
+    if conv.get("absence_requested"):
+        parts.append("discuss absence documentation")
+    if not parts:
+        return None
+    s = " and ".join(parts)
+    return s[0].upper() + s[1:]
+
+
+def clean_transcript(text: str) -> str:
+    """Speech-to-text artefacts: separator dashes and fragments with no words aren't student statements."""
+    t = re.sub(r"(^|\s)-+(\s|$)", " ", text or "").strip(" -.,")
+    return " ".join(t.split()) if re.search(r"[A-Za-z]{2,}", t) else ""
 
 
 def record_decline(conv: dict, text: str) -> str | None:

@@ -2,6 +2,7 @@ from datetime import date
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -47,6 +48,7 @@ def snapshot(db: Session, sess: IntakeSession) -> IntakeSnapshot:
         conversation_state=(sess.conversation or {}).get("state", "GREETING"), declined=list((sess.conversation or {}).get("declined", [])), unknown=list((sess.conversation or {}).get("unknown", [])),
         transcript=list((sess.conversation or {}).get("transcript", [])), started_at=sess.created_at, ended_at=sess.ended_at,
         chief_concern=sess.chief_concern, purpose=sess.purpose, absence_requested=bool(sess.absence_requested),
+        suggested_appointment_type=intake_service.suggested_type(sess),
         summary=previsit.status_for_session(db, sess), linked_encounter_id=(e.id if (e := previsit.session_encounter(db, sess)) else None),
     )
 
@@ -279,6 +281,24 @@ def handoff(encounter_id: str, body: HandoffIn, user: User = Depends(require_stu
 @router.post("/handoffs/{packet_id}/withdraw", response_model=HandoffOut)
 def withdraw(packet_id: str, user: User = Depends(require_student), db: Session = Depends(get_db)) -> HandoffOut:
     return _handoff_out(db, previsit.withdraw(db, user, packet_id))
+
+
+class ReshareIn(BaseModel):
+    encounter_id: str
+    student_authorized: bool
+
+
+@router.post("/handoffs/{packet_id}/reshare", response_model=HandoffOut)
+def reshare(packet_id: str, body: ReshareIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> HandoffOut:
+    """Share an approved summary with a different (new) appointment's clinician — explicit consent, new version."""
+    if not body.student_authorized:
+        raise ApiError(400, "AUTHORIZATION_REQUIRED", "Confirm that you want to share this summary with the new clinician.")
+    enc = db.get(Encounter, body.encounter_id)
+    if enc is None:
+        raise ApiError(404, "NOT_FOUND", "Appointment not found.")
+    p = previsit.reshare(db, user, packet_id, enc)
+    db.commit()
+    return _handoff_out(db, p)
 
 
 @router.get("/students/me/previsit-summaries")

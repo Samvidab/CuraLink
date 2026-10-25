@@ -33,7 +33,7 @@ def case(student):
     sid = student.get("/api/v1/intake/sessions/current").json()["session_id"]
     student.patch(f"/api/v1/intake/sessions/{sid}/fields", json={"fields": [{"key": "symptoms_free_text", "value": {"text": "strep-like sore throat and vomiting"}}]})
     enc = student.get("/api/v1/students/me/encounters").json()[0]
-    r = student.post("/api/v1/absence-cases", json={"encounter_id": enc["id"], "requested_start": "2026-10-27", "requested_end": "2026-10-30", "note": "I'd rather not share details", "disclosure_consent": True})
+    r = student.post("/api/v1/absence-cases", json={"encounter_id": enc["id"], "reported_missed_dates": ["2026-10-26"], "note": "I'd rather not share details", "disclosure_consent": True})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -90,7 +90,7 @@ def test_excluding_courses_yields_exactly_matching_drafts(clinician, case):
     assert included == ["CS 240", "PHIL 208"]
 
 
-def test_full_signed_delivery_flow_with_all_gates(student, clinician, case):
+def test_full_signed_delivery_flow_with_all_gates(student, clinician, case, login):
     _certify(clinician, case["id"])
     doc = _render(clinician, case["id"])
     assert doc["state"] == "UNSIGNED" and doc["version"] == 1
@@ -115,9 +115,9 @@ def test_full_signed_delivery_flow_with_all_gates(student, clinician, case):
     replay = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/approve-sign", json={"nonce": req["nonce"], "document_sha256": req["document_sha256"], "recipient_courses": [x["course_code"] for x in req["recipients"]], "password": "curalink-demo", "confirm": True})
     assert replay.status_code == 409  # single-use nonce / already signed
 
-    # AT-07: unverified recipients block delivery.
+    # AT-07: unconfirmed recipients block delivery, with the precise reason and courses.
     r = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-key-0001"})
-    assert r.status_code == 409 and r.json()["code"] == "RECIPIENT_NOT_VERIFIED"
+    assert r.status_code == 409 and r.json()["code"] == "STUDENT_CONFIRMATION_MISSING" and "COM 217" in r.json()["details"]["courses"]
     assert clinician.get("/api/v1/demo/test-inbox").json() == []
 
     # Student corrects contacts -> clinician must render and sign a NEW version (AT-27).
@@ -136,6 +136,9 @@ def test_full_signed_delivery_flow_with_all_gates(student, clinician, case):
     clinician.post(f"/api/v1/clinician/documents/{doc2['id']}/deliver", json={"idempotency_key": "dlv-key-0003"})
     clinician.post(f"/api/v1/clinician/documents/{doc2['id']}/deliver", json={"idempotency_key": "dlv-key-0004"})
     assert len(clinician.get("/api/v1/demo/test-inbox").json()) == 4
+    assert len(student.get("/api/v1/demo/test-inbox").json()) == 4  # the student's own notices
+    assert login("jordan.kim@students.example.com")[0].get("/api/v1/demo/test-inbox").json() == []  # never another student's
+    assert login("dr.hale@clinic.example.com")[0].get("/api/v1/demo/test-inbox").json() == []  # nor an unassigned clinician
 
     mine = student.get("/api/v1/students/me/cases").json()[0]
     assert mine["status"] == "SENT" and mine["status_label"] == "Delivered to test inbox"
@@ -225,3 +228,125 @@ def test_dashboard_still_works_after_contact_correction(student, case):
 def test_case_metrics_are_measured_from_audit_log(student, case):
     m = student.get("/api/v1/students/me/cases").json()[0]["metrics"]
     assert m["request_to_delivery_seconds"] is None and m["student_actions"] >= 1
+
+
+# ---- only clinicians decide certified absence dates --------------------------------------------------------------
+
+def test_student_cannot_choose_or_change_certified_dates(student, clinician, case):
+    enc = student.get("/api/v1/students/me/encounters").json()[0]
+    for bad in ({"requested_start": "2026-10-27", "requested_end": "2026-10-30"}, {"start_date": "2026-10-27", "end_date": "2026-10-28"}, {"decision": "CERTIFY"}):
+        r = student.post("/api/v1/absence-cases", json={"encounter_id": enc["id"], **bad})
+        assert r.status_code == 422, bad  # rejected outright, never stored
+    assert student.post(f"/api/v1/clinician/absence-cases/{case['id']}/decision", json={"decision": "CERTIFY", "start_date": "2026-10-27", "end_date": "2026-11-05"}).status_code == 403
+    assert student.post(f"/api/v1/clinician/absence-cases/{case['id']}/render", json={}).status_code == 403
+    assert student.patch(f"/api/v1/absence-cases/{case['id']}", json={"start_date": "2026-10-27"}).status_code in (404, 405)
+    mine = student.get("/api/v1/students/me/cases").json()[0]
+    assert mine["decision"] is None and mine["reported_missed_dates"] == ["2026-10-26"] and mine["legacy_requested_range"] is None
+    assert "requested_start" not in mine
+
+
+def test_reported_missed_dates_are_facts_not_certification(student, clinician, case):
+    view = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()
+    assert view["reported_missed_dates"] == ["2026-10-26"] and view["decision"] is None
+    assert view["status"] in ("STUDENT_REQUESTED", "CLINICIAN_REVIEW")  # nothing approved, nothing generated
+    assert clinician.post(f"/api/v1/clinician/absence-cases/{case['id']}/render", json={}).status_code == 409  # no document before a CERTIFY decision
+
+
+def test_clinician_can_certify_multi_day_decline_or_defer(clinician, case):
+    out = _certify(clinician, case["id"], "2026-10-27", "2026-10-30")
+    assert out["decision"]["start_date"] == "2026-10-27" and out["decision"]["end_date"] == "2026-10-30" and out["status"] == "DATES_SET"
+    for decision, status in (("DEFER", "DEFERRED"), ("DECLINE", "REJECTED")):
+        r = clinician.post(f"/api/v1/clinician/absence-cases/{case['id']}/decision", json={"decision": decision})
+        assert r.json()["status"] == status and r.json()["decision"]["start_date"] is None
+
+
+# ---- delivery statuses are distinct, persisted, and shared by both portals --------------------------------------
+
+def _purdue_like_contacts(student):
+    """Real-looking (non-test) instructor addresses, confirmed by the student, like a real UniTime import."""
+    courses = student.get("/api/v1/students/me/dashboard").json()["courses"]
+    for c in courses:
+        r = student.patch(f"/api/v1/courses/{c['id']}/contact", json={"instructor_email": f"{c['code'].replace(' ', '').lower()}@purdue.edu", "confirm": True})
+        assert r.status_code == 200, r.text
+    return courses
+
+
+def _signed_v1(clinician, case_id):
+    clinician.post("/api/v1/clinician/signature-assets")
+    _certify(clinician, case_id)
+    doc = _render(clinician, case_id)
+    r, _ = _sign(clinician, doc["id"])
+    assert r.status_code == 200
+    return doc
+
+
+def test_confirmed_real_looking_contacts_go_to_isolated_test_inbox_without_resigning(app, student, clinician, case, login):
+    _purdue_like_contacts(student)
+    doc = _signed_v1(clinician, case["id"])
+    view = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()
+    dv = view["delivery"]
+    assert dv["clinician_signed"] and dv["student_consent"] and dv["contacts_confirmed"] and dv["ready"] and dv["blockers"] == []
+    assert {r["contact_label"] for r in dv["recipients"]} == {"Confirmed by student"} and {r["demo_route"] for r in dv["recipients"]} == {"ISOLATED_TEST_INBOX"}
+    signed_sha = view["document"]["signed_sha256"]
+    out = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-real-0001"}).json()
+    assert out["status"] == "SENT" and all(d["simulated"] and d["intended_recipient"].endswith("@purdue.edu") for d in out["deliveries"])
+    after = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()
+    assert after["document"]["version"] == 1 and after["document"]["state"] == "SIGNED" and after["document"]["signed_sha256"] == signed_sha  # signature untouched
+    inbox = clinician.get("/api/v1/demo/test-inbox").json()
+    assert inbox and all(m["to"].endswith("@test-inbox.example.com") and not m["to"].endswith("purdue.edu") and m["intended_recipient"].endswith("@purdue.edu") for m in inbox)
+    assert after["delivery"]["delivered"] and not after["delivery"]["ready"]
+
+
+def test_demo_redirect_off_reports_not_permitted_and_keeps_the_signature(student, clinician, case, monkeypatch):
+    from app.config import get_settings
+
+    _purdue_like_contacts(student)
+    doc = _signed_v1(clinician, case["id"])
+    monkeypatch.setattr(get_settings(), "demo_inbox_redirect", False)
+    r = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-real-0002"})
+    assert r.status_code == 409 and r.json()["code"] == "RECIPIENT_NOT_PERMITTED_FOR_DEMO"
+    view = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()
+    assert view["document"]["state"] == "SIGNED" and view["delivery"]["contacts_confirmed"]  # confirmed, just not deliverable in the demo
+    assert [b["code"] for b in view["delivery"]["blockers"]] == ["RECIPIENT_NOT_PERMITTED_FOR_DEMO"]
+    assert clinician.get("/api/v1/demo/test-inbox").json() == []
+
+
+def test_confirming_the_same_address_after_signing_needs_no_new_signature(student, clinician, case):
+    courses = {c["code"]: c for c in student.get("/api/v1/students/me/dashboard").json()["courses"]}
+    student.patch(f"/api/v1/courses/{courses['PHIL 208']['id']}/contact", json={"instructor_email": "dana.williams@example.com", "confirm": True})
+    doc = _signed_v1(clinician, case["id"])  # COM 217 still unconfirmed at signing time
+    blockers = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()["delivery"]["blockers"]
+    assert [(b["code"], b["courses"]) for b in blockers] == [("STUDENT_CONFIRMATION_MISSING", ["COM 217"])]
+    student.patch(f"/api/v1/courses/{courses['COM 217']['id']}/contact", json={"instructor_email": courses["COM 217"]["instructor_email"], "confirm": True})
+    assert clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-same-0001"}).json()["status"] == "SENT"
+
+
+def test_changed_email_or_document_after_signing_is_reported_precisely(student, clinician, case):
+    _purdue_like_contacts(student)
+    doc = _signed_v1(clinician, case["id"])
+    courses = {c["code"]: c for c in student.get("/api/v1/students/me/dashboard").json()["courses"]}
+    student.patch(f"/api/v1/courses/{courses['CS 240']['id']}/contact", json={"instructor_email": "someone.else@purdue.edu", "confirm": True})
+    r = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-chg-0001"})
+    assert r.json()["code"] == "RECIPIENTS_CHANGED_AFTER_SIGNING" and r.json()["details"]["courses"] == ["CS 240"]
+    _render(clinician, case["id"])  # a newer version exists now
+    r = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-chg-0002"})
+    assert r.json()["code"] == "NOT_SIGNED" or r.json()["code"] == "DOCUMENT_CHANGED_AFTER_SIGNING"
+
+
+def test_consent_missing_is_its_own_status(student, clinician, case):
+    _purdue_like_contacts(student)
+    doc = _signed_v1(clinician, case["id"])
+    student.post(f"/api/v1/absence-cases/{case['id']}/consent", json={"consent": False})
+    r = clinician.post(f"/api/v1/clinician/documents/{doc['id']}/deliver", json={"idempotency_key": "dlv-cons-0001"})
+    assert r.json()["code"] == "STUDENT_CONSENT_MISSING"
+
+
+def test_student_confirmations_persist_across_sessions_and_both_portals_agree(app, student, clinician, case, login):
+    _purdue_like_contacts(student)
+    _signed_v1(clinician, case["id"])
+    student.post("/api/v1/auth/logout")
+    again, _ = login("sam.lee@students.example.com", expected_role="student")
+    mine = again.get("/api/v1/students/me/cases").json()[0]["delivery"]
+    theirs = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()["delivery"]
+    assert mine["recipients"] == theirs["recipients"] and mine["blockers"] == theirs["blockers"]
+    assert {r["contact_label"] for r in mine["recipients"]} == {"Confirmed by student"}

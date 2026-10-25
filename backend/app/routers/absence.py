@@ -3,10 +3,11 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.errors import ApiError
 from app.models import (
@@ -22,7 +23,7 @@ from app.models import (
     User,
 )
 from app.routers.clinician import assigned_encounter
-from app.routers.system import _demo_only
+from app.routers.system import _demo_only, demo_admin
 from app.security import current_user, require_clinician, require_student, verify_password
 from app import curalink_config as cfg
 from app.services import absence_service as svc
@@ -49,9 +50,12 @@ STATUS_LABELS = {
 # ---- schemas ----------------------------------------------------------------
 
 class CaseIn(BaseModel):
+    """A request for an absence-documentation review. Students never choose certified dates: any extra field
+    (requested/certified/start/end dates, decisions) is rejected, not silently ignored."""
+
+    model_config = ConfigDict(extra="forbid")
     encounter_id: str
-    requested_start: date
-    requested_end: date
+    reported_missed_dates: list[date] = Field(default_factory=list, max_length=21)  # student-reported class absences
     note: str | None = Field(None, max_length=1000)
     disclosure_consent: bool = False
 
@@ -110,7 +114,8 @@ def _impact_out(impact, recips: list[dict]) -> dict:
 
 def _deliveries(db: Session, case_id: str) -> list[dict]:
     rows = db.scalars(select(Delivery).where(Delivery.case_id == case_id).order_by(Delivery.queued_at)).all()
-    return [{"id": d.id, "course_code": d.course_code, "destination": d.destination, "state": d.state, "attempts": d.attempts, "error_code": d.error_code, "receipt_id": d.receipt_id, "sent_at": d.sent_at, "version_id": d.version_id} for d in rows]
+    return [{"id": d.id, "course_code": d.course_code, "destination": d.destination, "intended_recipient": d.intended_recipient, "simulated": bool(d.intended_recipient),
+             "state": d.state, "attempts": d.attempts, "error_code": d.error_code, "receipt_id": d.receipt_id, "sent_at": d.sent_at, "version_id": d.version_id} for d in rows]
 
 
 def _timeline(db: Session, case: AbsenceCase) -> list[dict]:
@@ -136,6 +141,12 @@ def _version_out(v: DocumentVersion | None, include_content: bool) -> dict | Non
     return out
 
 
+def _reported(case: AbsenceCase) -> dict:
+    """Student-reported facts only. Certified dates are in the clinician decision, never here."""
+    return {"reported_missed_dates": list(case.reported_missed_dates or []),
+            "legacy_requested_range": {"start": case.requested_start, "end": case.requested_end} if case.requested_start else None}
+
+
 def student_case_out(db: Session, case: AbsenceCase) -> dict:
     """Student view: no clinician private notes, no signature asset, no document internals."""
     enc = db.get(Encounter, case.encounter_id)
@@ -146,10 +157,11 @@ def student_case_out(db: Session, case: AbsenceCase) -> dict:
     return {
         "id": case.id, "status": case.status, "status_label": STATUS_LABELS.get(case.status, case.status), "origin": case.origin or "student",
         "encounter_id": enc.id, "visit_type": enc.visit_type, "appointment_at": to_local(enc.starts_at, student.timezone), "clinician_name": doc.display_name,
-        "requested_start": case.requested_start, "requested_end": case.requested_end,
+        **_reported(case),
         "disclosure_consent": case.disclosure_consent and case.consent_revoked_at is None, "consent_revoked_at": case.consent_revoked_at,
         "decision": {"decision": d.decision, "start_date": d.start_date, "end_date": d.end_date} if d else None,
         "document": {"version": v.version, "state": v.state, "signed_at": v.signed_at} if v else None,
+        "delivery": svc.delivery_readiness(db, case, v),  # same persisted records the clinician sees
         "deliveries": _deliveries(db, case.id), "timeline": (tl := _timeline(db, case)), "created_at": case.created_at,
         "excused_status": "UNKNOWN — decided by your university",
         "metrics": _metrics(tl, case),
@@ -169,7 +181,7 @@ def clinician_case_out(db: Session, case: AbsenceCase, clinician: User) -> dict:
     return {
         "id": case.id, "status": case.status, "status_label": STATUS_LABELS.get(case.status, case.status), "origin": case.origin or "student",
         "encounter_id": enc.id, "visit_type": enc.visit_type, "appointment_at": to_local(enc.starts_at, clinician.timezone),
-        "student_name": student.display_name, "requested_start": case.requested_start, "requested_end": case.requested_end,
+        "student_name": student.display_name, **_reported(case),
         "student_note": case.student_note,
         "decision": {"decision": d.decision, "start_date": d.start_date, "end_date": d.end_date, "wording": d.wording, "rationale_private": d.rationale_private, "version": d.version} if d else None,
         "impact": impact, "document": _version_out(v, include_content=True),
@@ -180,6 +192,7 @@ def clinician_case_out(db: Session, case: AbsenceCase, clinician: User) -> dict:
             "signed": bool(v and v.state == "SIGNED"),
             "recipients_verified": bool(v and all(m["deliverable"] for m in v.content["messages"] if m["include"])),
         },
+        "delivery": svc.delivery_readiness(db, case, v),
         "deliveries": _deliveries(db, case.id), "timeline": _timeline(db, case),
     }
 
@@ -193,10 +206,11 @@ def _own_case(db: Session, user: User, case_id: str) -> AbsenceCase:
     return case
 
 
-@router.post("/absence-cases/preview")
-def preview(body: ImpactQuery, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
-    imp = svc.compute_impact(db, user, body.start_date, body.end_date)
-    return _impact_out(imp, svc.recipients(db, user.id, imp))
+@router.get("/students/me/instructor-contacts")
+def instructor_contacts(user: User = Depends(require_student), db: Session = Depends(get_db)) -> list[dict]:
+    """Selected-term courses with contact status, so the student can fix missing addresses. No dates involved:
+    which class meetings are affected is computed only after the clinician decides."""
+    return svc.course_contacts(db, user)
 
 
 @router.post("/absence-cases")
@@ -204,12 +218,16 @@ def create_case(body: CaseIn, user: User = Depends(require_student), db: Session
     enc = db.get(Encounter, body.encounter_id)
     if enc is None or enc.student_id != user.id or enc.status == "CANCELLED":
         raise ApiError(404, "NOT_FOUND", "Choose one of your demo appointments.")
-    svc.compute_impact(db, user, body.requested_start, body.requested_end)  # validates range
-    case = AbsenceCase(id=f"case_{uuid4().hex[:8]}", student_id=user.id, encounter_id=enc.id, requested_start=body.requested_start, requested_end=body.requested_end, student_note=(body.note or "").strip() or None)
+    today = get_settings().demo_today
+    dates = sorted(set(body.reported_missed_dates))
+    if any(abs((d - today).days) > 60 for d in dates):
+        raise ApiError(422, "INVALID_DATES", "Reported class absences must be within 60 days of today.")
+    case = AbsenceCase(id=f"case_{uuid4().hex[:8]}", student_id=user.id, encounter_id=enc.id, requested_start=None, requested_end=None,
+                       reported_missed_dates=[d.isoformat() for d in dates], student_note=(body.note or "").strip() or None)
     if body.disclosure_consent:
         case.disclosure_consent, case.disclosure_consent_at = True, utcnow()
     db.add(case)
-    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="ABSENCE_REQUESTED", object_type="absence_case", object_id=case.id, to_state="STUDENT_REQUESTED", detail="student-requested dates (not certified)")
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="ABSENCE_REQUESTED", object_type="absence_case", object_id=case.id, to_state="STUDENT_REQUESTED", detail=f"documentation review requested; {len(dates)} student-reported class absence dates (not certified)")
     if body.disclosure_consent:
         audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="DISCLOSURE_CONSENT_GRANTED", object_type="absence_case", object_id=case.id)
     db.commit()
@@ -284,8 +302,7 @@ def open_case_for_encounter(encounter_id: str, user: User = Depends(require_clin
     enc = assigned_encounter(db, user, encounter_id)
     case = db.scalar(select(AbsenceCase).where(AbsenceCase.encounter_id == enc.id).order_by(AbsenceCase.created_at.desc()))
     if case is None:
-        d = to_local(enc.starts_at, user.timezone).date()
-        case = AbsenceCase(id=f"case_{uuid4().hex[:8]}", student_id=enc.student_id, encounter_id=enc.id, requested_start=d, requested_end=d, origin="clinician", status="CLINICIAN_REVIEW")
+        case = AbsenceCase(id=f"case_{uuid4().hex[:8]}", student_id=enc.student_id, encounter_id=enc.id, requested_start=None, requested_end=None, reported_missed_dates=[], origin="clinician", status="CLINICIAN_REVIEW")
         db.add(case)
         audit.record(db, actor_role="clinician", actor_id=user.id, subject_student_id=enc.student_id, action="CASE_OPENED", object_type="absence_case", object_id=case.id, to_state="CLINICIAN_REVIEW", detail="clinician-initiated")
         db.commit()
@@ -295,7 +312,7 @@ def open_case_for_encounter(encounter_id: str, user: User = Depends(require_clin
 @router.get("/clinician/absence-cases")
 def clinician_cases(user: User = Depends(require_clinician), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(select(AbsenceCase, Encounter, User).join(Encounter, AbsenceCase.encounter_id == Encounter.id).join(User, AbsenceCase.student_id == User.id).where(Encounter.clinician_id == user.id).order_by(AbsenceCase.created_at.desc())).all()
-    return [{"id": c.id, "student_name": u.display_name, "encounter_id": e.id, "visit_type": e.visit_type, "status": c.status, "status_label": STATUS_LABELS.get(c.status, c.status), "requested_start": c.requested_start, "requested_end": c.requested_end, "created_at": c.created_at} for c, e, u in rows]
+    return [{"id": c.id, "student_name": u.display_name, "encounter_id": e.id, "visit_type": e.visit_type, "status": c.status, "status_label": STATUS_LABELS.get(c.status, c.status), **_reported(c), "created_at": c.created_at} for c, e, u in rows]
 
 
 @router.get("/clinician/absence-cases/{case_id}")
@@ -476,12 +493,19 @@ def revoke_asset(asset_id: str, user: User = Depends(require_clinician), db: Ses
 
 @router.get("/demo/test-inbox", dependencies=[Depends(_demo_only)])
 def test_inbox(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict]:
-    """What 'professors' would have received. Demo transport only; nothing leaves the server."""
-    rows = db.scalars(select(TestInboxMessage).order_by(TestInboxMessage.received_at.desc()).limit(50)).all()
-    return [{"id": m.id, "to": m.to, "subject": m.subject, "body": m.body, "attachment_name": m.attachment_name, "attachment_sha256": m.attachment_sha256, "received_at": m.received_at} for m in rows]
+    """What 'professors' would have received, for the viewer's OWN cases (student) or cases assigned to them
+    (clinician). Demo transport only; nothing leaves the server."""
+    q = select(TestInboxMessage).join(Delivery, TestInboxMessage.delivery_id == Delivery.id).join(AbsenceCase, Delivery.case_id == AbsenceCase.id)
+    if user.role == "student":
+        q = q.where(AbsenceCase.student_id == user.id)
+    else:
+        q = q.join(Encounter, AbsenceCase.encounter_id == Encounter.id).where(Encounter.clinician_id == user.id)
+    rows = db.scalars(q.order_by(TestInboxMessage.received_at.desc()).limit(50)).all()
+    return [{"id": m.id, "to": m.to, "intended_recipient": m.intended_recipient, "subject": m.subject, "body": m.body, "attachment_name": m.attachment_name,
+             "attachment_sha256": m.attachment_sha256, "received_at": m.received_at} for m in rows]
 
 
-@router.post("/demo/transport/fail-next", dependencies=[Depends(_demo_only)])
+@router.post("/demo/transport/fail-next", dependencies=[Depends(demo_admin)])
 def fail_next(count: int = 1, user: User = Depends(current_user)) -> dict:
     svc.TestInboxTransport.fail_next = max(0, min(count, 10))
     return {"fail_next": svc.TestInboxTransport.fail_next}
