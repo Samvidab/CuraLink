@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, Card } from './ui'
 import { useAuth } from '../lib/auth'
 import { api, ApiError } from '../lib/api'
 import { fmtDay, fmtRange, initials, ymdIn } from '../lib/format'
-import type { ClinicianCardData, ConfirmResult, ScheduleSlot } from '../lib/types'
+import type { ClinicianCardData, ConfirmResult, ScheduleSlot, SummaryStatus } from '../lib/types'
 
 const TYPE: Record<string, string> = { routine_checkup: 'Routine checkup', vaccination: 'Vaccinations', mental_health: 'Mental health', general_consultation: 'General consultation' }
 const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : `k-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -33,9 +33,13 @@ export function SlotConfirmDialog({ slot, onClose, onBooked, onStale, intakeSess
   const [key] = useState(newKey)
   const [purpose, setPurpose] = useState(initialPurpose ?? '')
   const [absence, setAbsence] = useState(!!initialAbsence)
+  // Summaries approved for an appointment that was later cancelled reach this clinician only if ticked here.
+  const summaries = useQuery({ queryKey: ['my-previsit-summaries'], queryFn: () => api.get<SummaryStatus[]>('/students/me/previsit-summaries') })
+  const reshareable = (summaries.data ?? []).filter(s => s.status === 'SHARED' && s.appointment_cancelled)
+  const [shareIds, setShareIds] = useState<string[]>([])
   const book = useMutation({
-    mutationFn: () => api.post<ConfirmResult>('/appointments/confirm', { slot_id: slot.id, student_approved: true, idempotency_key: key, intake_session_id: intakeSessionId ?? null, purpose: purpose.trim() || null, absence_requested: absence }),
-    onSuccess: r => { for (const k of ['student-dashboard', 'my-appointments', 'my-encounters', 'schedule-search']) qc.invalidateQueries({ queryKey: [k] }); onBooked(r) },
+    mutationFn: () => api.post<ConfirmResult>('/appointments/confirm', { slot_id: slot.id, student_approved: true, idempotency_key: key, intake_session_id: intakeSessionId ?? null, purpose: purpose.trim() || null, absence_requested: absence, share_summary_ids: shareIds }),
+    onSuccess: r => { for (const k of ['student-dashboard', 'my-appointments', 'my-encounters', 'schedule-search', 'my-previsit-summaries', 'intake']) qc.invalidateQueries({ queryKey: [k] }); onBooked(r) },
     onError: e => { if (e instanceof ApiError && ['SLOT_UNAVAILABLE', 'CLASS_CONFLICT'].includes(e.code)) { qc.invalidateQueries({ queryKey: ['schedule-search'] }); onStale(e.message) } },
   })
   const rows: [string, string][] = [['Student', me?.display_name ?? ''], ['Clinician', slot.clinician_name], ['Appointment type', slot.appointment_label], ['Date', fmtDay(slot.starts_at, undefined, { weekday: 'long', month: 'long', day: 'numeric' })], ['Time', `${fmtRange(slot.starts_at, slot.ends_at)} (${slot.minutes} min)`], ['Location', `${slot.clinic_name}${slot.location ? `, ${slot.location}` : ''}`]]
@@ -43,6 +47,7 @@ export function SlotConfirmDialog({ slot, onClose, onBooked, onStale, intakeSess
     <dl className="mt-4 space-y-2 text-sm">{rows.map(([k,v])=><div key={k} className="flex justify-between gap-4"><dt className="text-slate-500">{k}</dt><dd className="text-right font-semibold">{v}</dd></div>)}</dl>
     <label className="mt-4 block text-sm font-semibold">Reason for visit <span className="font-normal text-slate-500">(optional, your words)</span><input value={purpose} maxLength={300} onChange={e=>setPurpose(e.target.value)} className="input mt-2" placeholder="e.g. checkup, follow-up, absence note"/></label>
     <label className="mt-3 flex items-start gap-3 text-sm"><input type="checkbox" checked={absence} onChange={e=>setAbsence(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I’d like to discuss absence documentation <span className="text-slate-500">(a request — only the clinician decides)</span></span></label>
+    {reshareable.length>0&&<fieldset className="mt-4 rounded-xl border border-slate-200 p-3"><legend className="px-1 text-sm font-semibold">Approved pre-visit summaries from a cancelled appointment</legend>{reshareable.map(s=><label key={s.packet_id} className="mt-2 flex items-start gap-3 text-sm"><input type="checkbox" checked={shareIds.includes(s.packet_id)} onChange={e=>setShareIds(x=>e.target.checked?[...x,s.packet_id]:x.filter(y=>y!==s.packet_id))} className="mt-0.5 size-5 accent-teal-700"/><span>Also share my summary from {s.started_at?fmtDay(s.started_at,undefined,{month:'short',day:'numeric'}):'an earlier conversation'}{s.summary?.chief_concern?` (“${s.summary.chief_concern.slice(0,60)}”)`:''} with {slot.clinician_name}</span></label>)}<p className="mt-2 text-xs text-slate-500">Off unless you tick it. It was approved for a different clinician.</p></fieldset>}
     <p className="mt-4 rounded-xl bg-sky-50 p-3 text-sm text-sky-800">Demo appointment — not booked with a real clinic. Availability is re-checked when you confirm.</p>
     <label className="mt-4 flex items-start gap-3 text-sm"><input type="checkbox" checked={ok} onChange={e=>setOk(e.target.checked)} className="mt-0.5 size-5 accent-teal-700"/><span>I want to book this simulated appointment with {slot.clinician_name}.</span></label>
     {book.error&&!(book.error instanceof ApiError&&['SLOT_UNAVAILABLE','CLASS_CONFLICT'].includes(book.error.code))&&<p role="alert" className="mt-3 text-sm text-rose-600">{(book.error as Error).message}</p>}

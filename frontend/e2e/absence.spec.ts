@@ -9,10 +9,12 @@ test('student request → clinician decides, signs this version, sends to test i
 
   // --- Student requests review (not certification) and fixes contacts.
   await page.goto('/student/cases')
-  await page.getByRole('button', { name: 'Request absence review' }).click()
-  await page.getByLabel('First date you may miss').fill('2026-10-28')
-  await page.getByLabel('Last date you may miss').fill('2026-10-29')
-  await page.getByRole('button', { name: /Review impacted classes/ }).click()
+  await page.getByRole('button', { name: 'Request absence documentation review' }).click()
+  await expect(page.getByLabel(/First date you may miss/)).toHaveCount(0) // students never choose certified dates
+  await page.getByLabel('Day you missed or expect to miss class').fill('2026-10-26')
+  await page.getByRole('button', { name: 'Add day' }).click()
+  await expect(page.getByRole('list', { name: 'Student-reported class absences' })).toContainText('Oct 26')
+  await page.getByRole('button', { name: /Check instructor contacts/ }).click()
   await expect(page.getByText('PHIL 208 · Ethics of Data')).toBeVisible()
   await page.getByLabel('Instructor email for PHIL 208').fill('dana.williams@example.com')
   const phil = page.locator('div.rounded-xl', { has: page.getByText('PHIL 208 · Ethics of Data') })

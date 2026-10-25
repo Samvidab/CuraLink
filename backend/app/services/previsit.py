@@ -53,10 +53,32 @@ def build(sess: IntakeSession, fields: list[IntakeField], photos: list[Attachmen
                     "observations": a.observations, "limitations": a.limitations} for a in photos],
         "not_known": [_label(k) for k in conv.get("unknown", [])],
         "declined": [_label(k) for k in sorted(set(conv.get("declined", [])) | set(sess.skipped_fields or []))],
+        "follow_ups": follow_ups(conv, by, photos),
         "reason_for_visit": sess.purpose if include_purpose and sess.purpose else None,
         "absence_documentation": ("REQUESTED" if sess.absence_requested else "NOT_REQUESTED") if include_absence else "NOT_SHARED",
         "disclaimer": DISCLAIMER,
     }
+
+
+QUESTIONS = {"temperature": "Have you measured your temperature?", "onset_text": "When did it start?", "photo": "Would you like to add a photo?"}
+
+
+def follow_ups(conv: dict, shared: dict, photos: list) -> list[dict]:
+    """The contextual questions CuraLink asked in this conversation and what the student chose to share in reply."""
+    out = []
+    for key, n in (conv.get("asked") or {}).items():
+        if not n or key not in QUESTIONS:
+            continue
+        if key == "photo":
+            answer = f"{len(photos)} photo{'s' if len(photos) != 1 else ''} shared" if photos else None
+        else:
+            f = shared.get(key) or (shared.get("onset_date") if key == "onset_text" else None)
+            answer = display(f.key, f.value) if f else None
+        if answer is None:
+            answer = ("Student didn't know / hadn't measured" if key in conv.get("unknown", []) else
+                      "Student declined to answer" if key in conv.get("declined", []) else "Not shared")
+        out.append({"key": key, "question": QUESTIONS[key], "answer": answer})
+    return out
 
 
 def legacy_summary(p: HandoffPacket, sess: IntakeSession | None) -> dict:
@@ -69,7 +91,7 @@ def legacy_summary(p: HandoffPacket, sess: IntakeSession | None) -> dict:
         "symptoms": symptoms, "onset": next((vals[k]["display"] for k in ("onset_text", "onset_date") if k in vals), None),
         "measurements": [{"key": "temperature", "label": "Temperature", "value": temp["value"].get("value"), "unit": temp["value"].get("unit"), "display": temp["display"], "source": "Student-reported"}] if temp else [],
         "other": [{"key": k, "label": vals[k]["label"], "display": vals[k]["display"]} for k in OTHER_KEYS if k in vals], "photos": [],
-        "not_known": [], "declined": [], "reason_for_visit": None, "absence_documentation": "NOT_SHARED", "disclaimer": DISCLAIMER,
+        "not_known": [], "declined": [], "follow_ups": [], "reason_for_visit": None, "absence_documentation": "NOT_SHARED", "disclaimer": DISCLAIMER,
     }
 
 
@@ -152,6 +174,35 @@ def submit(db: Session, student: User, sess: IntakeSession, field_keys: list[str
     return packet
 
 
+def reshare(db: Session, student: User, packet_id: str, enc: Encounter) -> HandoffPacket:
+    """Student explicitly shares an approved summary with a NEW appointment (e.g. after cancelling the one it was
+    approved for). Creates the next version of that conversation's summary with fresh consent; nothing is edited."""
+    p = db.get(HandoffPacket, packet_id)
+    if p is None or _student_of(db, p) != student.id or p.status != "SHARED":
+        raise ApiError(404, "NOT_FOUND", "Approved summary not found.")
+    if enc.student_id != student.id or enc.status == "CANCELLED":
+        raise ApiError(404, "NOT_FOUND", "Appointment not found.")
+    if p.encounter_id == enc.id:
+        return p
+    doc = db.get(User, enc.clinician_id)
+    new = HandoffPacket(id=f"pkt_{uuid4().hex[:10]}", encounter_id=enc.id, session_id=p.session_id, student_id=student.id, version=latest(db, p.session_id).version + 1,
+                        field_snapshot=list(p.field_snapshot), summary=dict(p.summary) if p.summary else None, attachment_ids=list(p.attachment_ids or []),
+                        consent_text=f"I authorize sharing this summary with {doc.display_name} for my appointment.", source_mode="demo")
+    db.add(new)
+    p.status = "SUPERSEDED"
+    enc.status = "INTAKE_SHARED"
+    audit.record(db, actor_role="student", actor_id=student.id, subject_student_id=student.id, action="INTAKE_SHARED_WITH_CLINICIAN", object_type="intake_session",
+                 object_id=p.session_id, to_state="SHARED", detail=f"re-shared v{new.version} with encounter {enc.id}")
+    return new
+
+
+def reshareable(db: Session, student_id: str) -> list[HandoffPacket]:
+    """Approved summaries whose appointment was cancelled: they reach a new clinician only if the student says so."""
+    rows = db.scalars(select(HandoffPacket).join(Encounter, HandoffPacket.encounter_id == Encounter.id)
+                      .where(HandoffPacket.status == "SHARED", Encounter.student_id == student_id, Encounter.status == "CANCELLED")).all()
+    return [p for p in rows if _student_of(db, p) == student_id]
+
+
 def attach_pending(db: Session, student_id: str, enc: Encounter) -> int:
     """Booking fulfils 'share with the clinician I book next': attach the student's waiting summaries."""
     waiting = db.scalars(select(HandoffPacket).where(HandoffPacket.student_id == student_id, HandoffPacket.encounter_id.is_(None), HandoffPacket.status == "SHARED")).all()
@@ -186,6 +237,7 @@ def status_for_session(db: Session, sess: IntakeSession) -> dict | None:
     enc = db.get(Encounter, p.encounter_id) if p.encounter_id else None
     doc = db.get(User, enc.clinician_id) if enc else None
     return {"packet_id": p.id, "version": p.version, "status": p.status, "shared_at": p.student_approved_at.isoformat(), "encounter_id": p.encounter_id,
+            "appointment_cancelled": bool(enc and enc.status == "CANCELLED"),
             "clinician_name": doc.display_name if doc else None, "appointment_at": enc.starts_at.isoformat() if enc else None,
             "field_keys": [f["key"] for f in p.field_snapshot], "attachment_ids": list(p.attachment_ids or []), "summary": summary_of(db, p)}
 
@@ -193,9 +245,10 @@ def status_for_session(db: Session, sess: IntakeSession) -> dict | None:
 # ---- clinician side -----------------------------------------------------------------------------------------
 
 def visible_packets(db: Session, clinician: User, student_id: str) -> list[HandoffPacket]:
-    """Every packet of this student attached to an encounter currently assigned to this clinician."""
+    """Every packet of this student attached to an ACTIVE encounter currently assigned to this clinician
+    (a cancelled appointment ends that clinician's access; sharing with a new clinician needs new consent)."""
     return db.scalars(select(HandoffPacket).join(Encounter, HandoffPacket.encounter_id == Encounter.id)
-                      .where(Encounter.clinician_id == clinician.id, Encounter.student_id == student_id)).all()
+                      .where(Encounter.clinician_id == clinician.id, Encounter.student_id == student_id, Encounter.status != "CANCELLED")).all()
 
 
 def can_view_photo(db: Session, clinician: User, student_id: str, attachment_id: str) -> bool:
@@ -204,6 +257,8 @@ def can_view_photo(db: Session, clinician: User, student_id: str, attachment_id:
 
 def current_for_encounter(db: Session, enc: Encounter) -> HandoffPacket | None:
     """The most recently approved summary attached to this encounter (any session); withdrawn ones stay withdrawn."""
+    if enc.status == "CANCELLED":
+        return None
     rows = db.scalars(select(HandoffPacket).where(HandoffPacket.encounter_id == enc.id, HandoffPacket.status.in_(("SHARED", "WITHDRAWN")))
                       .order_by(HandoffPacket.student_approved_at.desc())).all()
     return next((p for p in rows if p.status == "SHARED"), rows[0] if rows else None)

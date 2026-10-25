@@ -18,7 +18,7 @@ from app.db import get_db
 from app.errors import ApiError
 from app.models import Appointment, Calendar, CalendarEvent, ClinicianProfile, ClinicSlot, Course, Encounter, IntakeField, IntakeSession, User
 from app.routers.student import appointment_summary
-from app.routers.system import _demo_only
+from app.routers.system import demo_admin
 from app.schemas import AppointmentSummary, BlockIn, CalendarEventOut, SchedulePreferences
 from app.security import require_student
 from app.services import audit, availability, previsit, scheduling, terms
@@ -48,6 +48,7 @@ class ConfirmIn(BaseModel):
     intake_session_id: str | None = None  # the conversation this booking came from (default: the open one, if it has content)
     purpose: str | None = Field(None, max_length=300)  # student's own words; never inferred symptoms
     absence_requested: bool | None = None  # student wants to DISCUSS absence documentation; not an approval
+    share_summary_ids: list[str] = Field(default_factory=list, max_length=10)  # approved summaries whose earlier appointment was cancelled, re-shared with explicit consent
 
 
 def _now() -> datetime:
@@ -201,6 +202,12 @@ def confirm(body: ConfirmIn, user: User = Depends(require_student), db: Session 
     db.add(enc)
     db.flush()
     attached = previsit.attach_pending(db, user.id, enc)  # summaries the student approved "for the clinician I book next"
+    allowed = {p.id for p in previsit.reshareable(db, user.id)}
+    for pid in dict.fromkeys(body.share_summary_ids):
+        if pid not in allowed:
+            raise ApiError(422, "UNKNOWN_SUMMARY", "One of the selected summaries can't be shared with this appointment.")
+        previsit.reshare(db, user, pid, enc)
+        attached += 1
     audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DEMO_CONFIRMED", object_type="appointment", object_id=appt.id, from_state="OFFERED", to_state="DEMO_CONFIRMED",
                  detail=f"clinician {cand.clinician_id}; case {enc.id}" + (f"; session {sess.id}" if sess else "") + ("; absence documentation requested" if absence else "") + (f"; {attached} summaries attached" if attached else ""))
     db.commit()
@@ -280,7 +287,7 @@ class OtherBookingIn(BaseModel):
     slot_id: str
 
 
-@router.post("/demo/book-as-other", dependencies=[Depends(_demo_only)])
+@router.post("/demo/book-as-other", dependencies=[Depends(demo_admin)])
 def book_as_other(body: OtherBookingIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
     """Demo control: another (fictional) student books this exact time, to show stale-slot recovery."""
     cand, profile = availability.validate(db, body.slot_id, _now())

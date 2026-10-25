@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+**/.venv
+**/__pycache__
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+backend/*.db
+backend/*.db-journal
+backend/.secrets
+.run
+*.zip

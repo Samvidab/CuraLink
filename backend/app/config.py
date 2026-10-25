@@ -3,6 +3,7 @@
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,6 +33,18 @@ class Settings(BaseSettings):
     session_cookie_name: str = "curalink_session"
     session_ttl_minutes: int = 8 * 60
     cookie_secure: bool = False
+
+    # CURALINK_CONFIG: DEPLOYMENT
+    # local (default): developer laptop. production: a public deployment; startup refuses unsafe settings
+    # (see app/deploy_checks.py and docs/DEPLOYMENT.md). Values are never logged.
+    environment: Literal["local", "production"] = "local"
+    # Demo admin controls (data reset, "book as another student", forced delivery failure):
+    #   open  = anyone (local only)   token = requires header X-CuraLink-Admin: <DEMO_ADMIN_TOKEN>   off = disabled
+    demo_controls: Literal["open", "token", "off"] = "open"
+    demo_admin_token: str | None = None
+    # Built frontend (frontend/dist) to serve from the API process: one same-origin deployable, so the
+    # HttpOnly session cookie stays first-party and no cross-site CORS is needed.
+    frontend_dist: Path | None = None
 
     # Delivery never leaves this allowlist in demo mode.
     test_email_allowlist: str = "example.com"

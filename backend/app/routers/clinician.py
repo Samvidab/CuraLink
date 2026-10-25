@@ -70,7 +70,20 @@ def dashboard(user: User = Depends(require_clinician), db: Session = Depends(get
             if c.status not in ("SENT", "REJECTED", "REVOKED")
         ),
         encounters=[_row(e, u, user.timezone) for e, u in rows],
+        previsit_notes=_notes_overview(db, user, rows),
     )
+
+
+def _notes_overview(db: Session, user: User, rows: list[tuple[Encounter, User]]) -> list[dict]:
+    """Which assigned appointments have approved pre-visit notes (counts and times only; content stays on the case page)."""
+    out = []
+    for enc, student in rows:
+        shared = [p for p in previsit.visible_packets(db, user, student.id) if p.status == "SHARED" and p.encounter_id == enc.id]
+        if shared:
+            latest = max(shared, key=lambda p: p.student_approved_at)
+            out.append({"encounter_id": enc.id, "student_name": student.display_name, "appointment_at": to_local(enc.starts_at, user.timezone),
+                        "sessions": len({p.session_id for p in shared}), "latest_submitted_at": to_local(latest.student_approved_at, user.timezone)})
+    return sorted(out, key=lambda x: x["latest_submitted_at"], reverse=True)
 
 
 @router.get("/encounters", response_model=list[EncounterRow])

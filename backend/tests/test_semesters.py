@@ -5,6 +5,8 @@ Regression for: imported schedule showed previous-semester classes and nothing i
 because expansion started at the file's EARLIEST event (+150 days) and courses were keyed by code only.
 """
 
+from datetime import date
+
 import pytest
 
 from app.config import get_settings
@@ -84,11 +86,18 @@ def test_selecting_a_term_updates_every_dependent_view(multi, clinician):
     assert _week(multi, "2026-10-26", "2026-11-02")["events"] == []  # Fall hidden while Spring is selected
     # Absence matching follows the selected term.
     multi.post("/api/v1/appointments/confirm", json={"slot_id": RIVERA_MON_1030, "student_approved": True, "idempotency_key": "term-key-0001"})
-    imp = multi.post("/api/v1/absence-cases/preview", json={"start_date": "2026-10-27", "end_date": "2026-10-29"}).json()
-    assert imp["courses"] == []
+    from app import db as dbmod
+    from app.models import User
+    from app.services import absence_service
+
+    db = next(dbmod.get_db())
+    sam = db.get(User, multi.get("/api/v1/me").json()["id"])
+    assert absence_service.compute_impact(db, sam, date(2026, 10, 27), date(2026, 10, 29)).courses == []
+    assert {c["course_code"] for c in multi.get("/api/v1/students/me/instructor-contacts").json()} == {"ENGL 10600", "MA 16500"}
     multi.put("/api/v1/calendar/selected-term", json={"term": "Fall 2026"})
-    imp = multi.post("/api/v1/absence-cases/preview", json={"start_date": "2026-10-27", "end_date": "2026-10-29"}).json()
-    assert {c["course_code"] for c in imp["courses"]} == {"CS 18000", "MA 26100", "COM 11400"}
+    db.expire_all()
+    assert {c.course_code for c in absence_service.compute_impact(db, sam, date(2026, 10, 27), date(2026, 10, 29)).courses} == {"CS 18000", "MA 26100", "COM 11400"}
+    assert {c["course_code"] for c in multi.get("/api/v1/students/me/instructor-contacts").json()} == {"CS 18000", "MA 26100", "COM 11400"}
 
 
 def test_scheduling_conflicts_use_the_selected_term(multi):

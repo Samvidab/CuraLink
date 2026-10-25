@@ -340,3 +340,89 @@ def test_pre_transcript_open_conversations_are_ended_not_silently_continued(stud
     s = snap(student)
     assert s["session_id"] != sess.id and s["transcript"] == []  # fresh conversation; the old one is kept, closed
     assert db.get(IntakeSession, sess.id).status == "CLOSED"
+
+
+def test_cancelled_appointment_ends_access_and_rebooking_needs_explicit_consent(app, student, login):
+    """Regression (live demo DB): Sam's summary was attached to a Hale booking; after cancelling and booking
+    Rivera, Rivera saw nothing and the student had no way to share it again."""
+    student.post("/api/v1/calendars/import-sample")
+    say(student, "I've had a headache and fever since yesterday")
+    s = snap(student)
+    student.patch(f"/api/v1/intake/sessions/{s['session_id']}/fields", json={"fields": [{"key": "temperature", "value": {"value": 101.1, "unit": "F"}}]})
+    hale_appt = book(student, slot("demo-clinician-2", "2026-10-27T08:00"), key="hale-first-01")
+    confirm_all(student)
+    p = submit(student)
+    assert p["encounter_id"] == hale_appt["case_id"]
+    hale, _ = login("dr.hale@clinic.example.com")
+    assert hale.get(f"/api/v1/clinician/encounters/{hale_appt['case_id']}/intake").json()["status"] == "SHARED"
+    student.post(f"/api/v1/appointments/{hale_appt['appointment_id']}/cancel")
+    assert hale.get(f"/api/v1/clinician/encounters/{hale_appt['case_id']}/intake").json()["status"] == "NOT_SHARED"  # access ended
+    assert [x["appointment_cancelled"] for x in student.get("/api/v1/students/me/previsit-summaries").json()] == [True]
+    # Booking Rivera does NOT silently move it...
+    plain = book(student, slot("demo-clinician-1", "2026-10-26T10:30"), key="rivera-plain-01")
+    rivera, _ = login("dr.rivera@clinic.example.com")
+    assert rivera.get(f"/api/v1/clinician/encounters/{plain['case_id']}/intake").json()["status"] == "NOT_SHARED"
+    # ...the student shares it explicitly (new version, new consent naming Rivera).
+    r = student.post(f"/api/v1/handoffs/{p['packet_id']}/reshare", json={"encounter_id": plain["case_id"], "student_authorized": True}).json()
+    assert r["version"] == 2 and "Dr. Avery Rivera" in r["consent_text"]
+    view = rivera.get(f"/api/v1/clinician/encounters/{plain['case_id']}/intake").json()
+    assert view["status"] == "SHARED" and view["summary"]["measurements"][0]["display"] == "101.1°F"
+    assert hale.get(f"/api/v1/clinician/encounters/{hale_appt['case_id']}/previsit-history").json()["groups"] == []
+
+
+def test_rebooking_can_share_cancelled_summaries_in_the_same_confirmation(student, clinician):
+    student.post("/api/v1/calendars/import-sample")
+    say(student, "I have a sore throat")
+    first = book(student, slot("demo-clinician-2", "2026-10-27T08:00"), key="hale-first-02")
+    confirm_all(student)
+    p = submit(student)
+    student.post(f"/api/v1/appointments/{first['appointment_id']}/cancel")
+    out = book(student, slot("demo-clinician-1", "2026-10-26T10:30"), key="rivera-share-02", share_summary_ids=[p["packet_id"]])
+    assert clinician.get(f"/api/v1/clinician/encounters/{out['case_id']}/intake").json()["status"] == "SHARED"
+    bad = student.post("/api/v1/appointments/confirm", json={"slot_id": slot("demo-clinician-1", "2026-10-28T09:00"), "student_approved": True, "idempotency_key": "rivera-share-03", "share_summary_ids": ["pkt_not_mine"]})
+    assert bad.status_code == 422
+
+
+def test_summary_lists_follow_up_answers_and_dashboard_lists_notes(student, clinician):
+    student.post("/api/v1/calendars/import-sample")
+    say(student, "I have a fever")
+    say(student, "I haven't measured it")
+    say(student, "since last night")
+    confirm_all(student)
+    submit(student)
+    out = book(student, key="followups-01")
+    summ = clinician.get(f"/api/v1/clinician/encounters/{out['case_id']}/intake").json()["summary"]
+    answers = {f["key"]: f["answer"] for f in summ["follow_ups"]}
+    assert answers["temperature"] == "Student didn't know / hadn't measured" and answers["onset_text"] == "since last night"
+    notes = clinician.get("/api/v1/clinician/dashboard").json()["previsit_notes"]
+    assert [(n["student_name"], n["sessions"]) for n in notes] == [("Sam Lee", 1)] and "summary" not in notes[0]  # no content on the queue
+
+
+def test_acceptance_two_conversations_persist_for_rivera_across_logins(app, login):
+    """Sam: headache+fever with measured temperature -> approve -> book Rivera -> logout; Rivera (new login) sees it;
+    a second conversation with a different concern is a separate dated entry; Hale has no access."""
+    sam, _ = login("sam.lee@students.example.com", expected_role="student")
+    sam.post("/api/v1/calendars/import-sample")
+    s1 = new_conversation(sam)
+    say(sam, "I've had a headache and fever since yesterday")
+    sam.patch(f"/api/v1/intake/sessions/{s1}/fields", json={"fields": [{"key": "temperature", "value": {"value": 100.9, "unit": "F"}}]})
+    confirm_all(sam)
+    submit(sam)
+    out = book(sam, key="acceptance-01")
+    sam.post("/api/v1/auth/logout")
+    sam2, _ = login("sam.lee@students.example.com", expected_role="student")
+    s2 = new_conversation(sam2)
+    say(sam2, "I have a rash on my arm")
+    confirm_all(sam2)
+    submit(sam2, encounter_id=out["case_id"])
+    sam2.post("/api/v1/auth/logout")
+    rivera, _ = login("dr.rivera@clinic.example.com")
+    latest = rivera.get(f"/api/v1/clinician/encounters/{out['case_id']}/intake").json()
+    assert latest["session"]["session_id"] == s2
+    hist = rivera.get(f"/api/v1/clinician/encounters/{out['case_id']}/previsit-history").json()
+    by_id = {s["session_id"]: s for g in hist["groups"] for s in g["sessions"]}
+    assert set(by_id) == {s1, s2}
+    assert by_id[s1]["summary"]["measurements"][0]["display"] == "100.9°F" and "rash" not in " ".join(by_id[s1]["summary"]["symptoms"]).lower()
+    assert by_id[s2]["summary"]["measurements"] == [] and "rash" in by_id[s2]["summary"]["chief_concern"].lower()
+    hale, _ = login("dr.hale@clinic.example.com")
+    assert hale.get(f"/api/v1/clinician/encounters/{out['case_id']}/intake").status_code == 403

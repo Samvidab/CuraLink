@@ -45,10 +45,11 @@ def create_all() -> None:
 
     Base.metadata.create_all(engine())
     _relax_not_null("handoff_packets", "encounter_id")
+    _relax_not_null("absence_cases", "requested_start", "requested_end")
     _add_missing_columns()
 
 
-def _relax_not_null(table: str, column: str) -> None:
+def _relax_not_null(table: str, *columns: str) -> None:
     """One-time rebuild for SQLite, which can't drop NOT NULL in place (pre-visit summaries may now exist
     before an appointment). Copies every row, keeps foreign keys pointing at the table name, and backs the
     database file up first. No-op when already nullable or on a fresh database."""
@@ -61,13 +62,13 @@ def _relax_not_null(table: str, column: str) -> None:
 
     insp = inspect(engine())
     cols = {c["name"]: c for c in insp.get_columns(table)}
-    if column not in cols or cols[column]["nullable"]:
+    if all(c not in cols or cols[c]["nullable"] for c in columns):
         return
     db_path = engine().url.database
     if db_path and db_path != ":memory:":
         backup = db_path.removesuffix(".db") + f".backup-{datetime.now():%Y%m%d%H%M%S}.db"
         shutil.copy2(db_path, backup)
-        logging.getLogger("curalink").warning("Upgrading %s.%s to nullable; backup saved to %s", table, column, backup)
+        logging.getLogger("curalink").warning("Upgrading %s.%s to nullable; backup saved to %s", table, ",".join(columns), backup)
     old = f"_{table}_pre_upgrade"
     keep = [c for c in cols if c in Base.metadata.tables[table].columns]
     with engine().connect() as conn:

@@ -267,8 +267,12 @@ class AbsenceCase(Base):
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     encounter_id: Mapped[str] = mapped_column(ForeignKey("encounters.id"))
     status: Mapped[str] = mapped_column(String, default="STUDENT_REQUESTED")
-    requested_start: Mapped[date] = mapped_column(Date)
-    requested_end: Mapped[date] = mapped_column(Date)
+    # LEGACY: older student requests carried a date range. Students no longer choose dates; these stay only so
+    # old rows remain readable (shown as "student-reported", never as certified). Certified dates live ONLY in
+    # ClinicianAbsenceDecision, which only the assigned clinician's routes can write.
+    requested_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requested_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    reported_missed_dates: Mapped[list | None] = mapped_column(JSON, nullable=True)  # student-reported class absences (factual)
     student_note: Mapped[str | None] = mapped_column(Text, nullable=True)  # clinician-only; never in professor messages
     origin: Mapped[str | None] = mapped_column(String, nullable=True)  # student | clinician (NULL = student, older rows)
     disclosure_consent: Mapped[bool] = mapped_column(Boolean, default=False)

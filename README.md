@@ -134,9 +134,13 @@ Acceptance tests from the Implementation Plan covered in code: AT-01–AT-14, AT
    - Try “I have chest pain” to see the safety stop.
 3. Ask “Which doctors are available?”, then “Can I see Dr. Rivera?”, pick a time and confirm. The *Appointments* page offers the same clinician cards.
 4. As **Dr. Rivera**, open Sam Lee. The latest summary shows the temperature and the absence request (*requested, not medically approved*), and *AI-Assisted Pre-Visit History* lists Session 1 and Session 2 separately. As Dr. Hale, Sam isn't visible.
-5. **My Cases** → request review for Wed–Fri → fix the missing PHIL 208 contact → consent → submit.
+5. **My Cases** → *Request absence documentation review*. Optionally add a day you missed class, recorded as a *student-reported class absence* and not an approved date. Fix the missing PHIL 208 contact → consent → submit. Students never choose certified dates; only the clinician does, in step 6.
 6. **Clinician** (second browser) → Signature Settings → **draw a signature** → Save → Absence Cases → Sam Lee → review the shared intake (accept/correct) → enter examination findings → *Approve an absence period* → type the dates → *Save absence period* (affected classes appear only now) → *Generate document* → *Approve & sign this version* (re-enter password) → *Send authorized copies*.
 7. Open the **test inbox**: minimal-disclosure notices, no symptoms. Student's **My Cases** shows “Delivered to test inbox … your university decides”.
+
+## Deployment
+
+Not deployed. The plan, including what Convex would and wouldn't provide, the single-container option, exact commands and the release gate, is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Publish only with the team's approval.
 
 ## Known limitations
 

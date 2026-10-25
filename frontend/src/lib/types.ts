@@ -130,6 +130,7 @@ export interface EncounterRow {
 }
 
 export interface ClinicianDashboard {
+  previsit_notes?: { encounter_id: string; student_name: string; appointment_at: string; sessions: number; latest_submitted_at: string }[]
   today: string
   display_name: string
   appointments_today: number
@@ -173,9 +174,9 @@ export interface PreVisitSummary {
   measurements: { key: string; label: string; value: number | null; unit: string | null; display: string; source: string }[]
   other: { key: string; label: string; display: string }[]
   photos: { attachment_id: string; observer: string; synthetic_demo: boolean; ai_generated: boolean; observations: PhotoAttachment['observations']; limitations: string[] }[]
-  not_known: string[]; declined: string[]; reason_for_visit: string | null; absence_documentation: 'REQUESTED' | 'NOT_REQUESTED' | 'NOT_SHARED'; disclaimer: string
+  not_known: string[]; declined: string[]; follow_ups?: { key: string; question: string; answer: string }[]; reason_for_visit: string | null; absence_documentation: 'REQUESTED' | 'NOT_REQUESTED' | 'NOT_SHARED'; disclaimer: string
 }
-export interface SummaryStatus { packet_id: string; version: number; status: 'SHARED' | 'SUPERSEDED' | 'WITHDRAWN'; shared_at: string; encounter_id: string | null; clinician_name: string | null; appointment_at: string | null; field_keys: string[]; attachment_ids: string[]; summary: PreVisitSummary }
+export interface SummaryStatus { packet_id: string; version: number; status: 'SHARED' | 'SUPERSEDED' | 'WITHDRAWN'; shared_at: string; encounter_id: string | null; appointment_cancelled?: boolean; session_id?: string; started_at?: string; clinician_name: string | null; appointment_at: string | null; field_keys: string[]; attachment_ids: string[]; summary: PreVisitSummary }
 export interface HistorySession {
   session_id: string; label: string; started_at: string; ended_at: string | null; local_date: string; status: string; status_label: string; version: number; packet_id: string; submitted_at: string
   versions: { version: number; status: string; submitted_at: string }[]; consent_text: string | null; summary: PreVisitSummary | null
@@ -212,7 +213,7 @@ export interface DeliveryRow { id: string; course_code: string; destination: str
 export interface TimelineItem { event_type: string; actor: string; to_state: string | null; status: string; at: string; detail: string | null }
 export interface StudentCase {
   id: string; status: string; status_label: string; origin: 'student' | 'clinician'; encounter_id: string; visit_type: string; appointment_at: string; clinician_name: string
-  requested_start: string; requested_end: string; disclosure_consent: boolean; consent_revoked_at: string | null
+  reported_missed_dates: string[]; legacy_requested_range: { start: string; end: string } | null; disclosure_consent: boolean; consent_revoked_at: string | null
   decision: { decision: 'CERTIFY' | 'DECLINE' | 'DEFER'; start_date: string | null; end_date: string | null } | null
   document: { version: number; state: string; signed_at: string | null } | null
   deliveries: DeliveryRow[]; timeline: TimelineItem[]; created_at: string; excused_status: string
@@ -222,13 +223,13 @@ export interface DraftMessage extends Recipient { subject: string; body: string;
 export interface DocVersion { id: string; version: number; state: 'UNSIGNED' | 'SIGNED' | 'SUPERSEDED' | 'REVOKED'; unsigned_sha256: string; signed_sha256: string | null; signed_at: string | null; created_at: string; content: { start_date: string; end_date: string; wording: string; courses: { code: string; dates: string[] }[]; days: ImpactDay[]; messages: DraftMessage[] } }
 export interface ClinicianCase {
   id: string; status: string; status_label: string; origin: 'student' | 'clinician'; encounter_id: string; visit_type: string; appointment_at: string; student_name: string
-  requested_start: string; requested_end: string; student_note: string | null
+  reported_missed_dates: string[]; legacy_requested_range: { start: string; end: string } | null; student_note: string | null
   decision: { decision: 'CERTIFY' | 'DECLINE' | 'DEFER'; start_date: string | null; end_date: string | null; wording: string | null; rationale_private: string | null; version: number } | null
   impact: Impact | null; document: DocVersion | null; signature_asset: { id: string; kind: string; created_at: string } | null
   gates: { student_consent: boolean; signed: boolean; recipients_verified: boolean }
   deliveries: DeliveryRow[]; timeline: TimelineItem[]
 }
-export interface ClinicianCaseRow { id: string; student_name: string; encounter_id: string; visit_type: string; status: string; status_label: string; requested_start: string; requested_end: string; created_at: string }
+export interface ClinicianCaseRow { id: string; student_name: string; encounter_id: string; visit_type: string; status: string; status_label: string; reported_missed_dates: string[]; legacy_requested_range: { start: string; end: string } | null; created_at: string }
 export interface SignRequest { nonce: string; expires_at: string; document_sha256: string; version: number; recipients: { course_code: string; email: string }[]; start_date: string; end_date: string }
 export interface InboxMessage { id: string; to: string; subject: string; body: string; attachment_name: string; attachment_sha256: string; received_at: string }
 

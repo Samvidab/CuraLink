@@ -33,7 +33,7 @@ def case(student):
     sid = student.get("/api/v1/intake/sessions/current").json()["session_id"]
     student.patch(f"/api/v1/intake/sessions/{sid}/fields", json={"fields": [{"key": "symptoms_free_text", "value": {"text": "strep-like sore throat and vomiting"}}]})
     enc = student.get("/api/v1/students/me/encounters").json()[0]
-    r = student.post("/api/v1/absence-cases", json={"encounter_id": enc["id"], "requested_start": "2026-10-27", "requested_end": "2026-10-30", "note": "I'd rather not share details", "disclosure_consent": True})
+    r = student.post("/api/v1/absence-cases", json={"encounter_id": enc["id"], "reported_missed_dates": ["2026-10-26"], "note": "I'd rather not share details", "disclosure_consent": True})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -90,7 +90,7 @@ def test_excluding_courses_yields_exactly_matching_drafts(clinician, case):
     assert included == ["CS 240", "PHIL 208"]
 
 
-def test_full_signed_delivery_flow_with_all_gates(student, clinician, case):
+def test_full_signed_delivery_flow_with_all_gates(student, clinician, case, login):
     _certify(clinician, case["id"])
     doc = _render(clinician, case["id"])
     assert doc["state"] == "UNSIGNED" and doc["version"] == 1
@@ -136,6 +136,9 @@ def test_full_signed_delivery_flow_with_all_gates(student, clinician, case):
     clinician.post(f"/api/v1/clinician/documents/{doc2['id']}/deliver", json={"idempotency_key": "dlv-key-0003"})
     clinician.post(f"/api/v1/clinician/documents/{doc2['id']}/deliver", json={"idempotency_key": "dlv-key-0004"})
     assert len(clinician.get("/api/v1/demo/test-inbox").json()) == 4
+    assert len(student.get("/api/v1/demo/test-inbox").json()) == 4  # the student's own notices
+    assert login("jordan.kim@students.example.com")[0].get("/api/v1/demo/test-inbox").json() == []  # never another student's
+    assert login("dr.hale@clinic.example.com")[0].get("/api/v1/demo/test-inbox").json() == []  # nor an unassigned clinician
 
     mine = student.get("/api/v1/students/me/cases").json()[0]
     assert mine["status"] == "SENT" and mine["status_label"] == "Delivered to test inbox"
@@ -225,3 +228,33 @@ def test_dashboard_still_works_after_contact_correction(student, case):
 def test_case_metrics_are_measured_from_audit_log(student, case):
     m = student.get("/api/v1/students/me/cases").json()[0]["metrics"]
     assert m["request_to_delivery_seconds"] is None and m["student_actions"] >= 1
+
+
+# ---- only clinicians decide certified absence dates --------------------------------------------------------------
+
+def test_student_cannot_choose_or_change_certified_dates(student, clinician, case):
+    enc = student.get("/api/v1/students/me/encounters").json()[0]
+    for bad in ({"requested_start": "2026-10-27", "requested_end": "2026-10-30"}, {"start_date": "2026-10-27", "end_date": "2026-10-28"}, {"decision": "CERTIFY"}):
+        r = student.post("/api/v1/absence-cases", json={"encounter_id": enc["id"], **bad})
+        assert r.status_code == 422, bad  # rejected outright, never stored
+    assert student.post(f"/api/v1/clinician/absence-cases/{case['id']}/decision", json={"decision": "CERTIFY", "start_date": "2026-10-27", "end_date": "2026-11-05"}).status_code == 403
+    assert student.post(f"/api/v1/clinician/absence-cases/{case['id']}/render", json={}).status_code == 403
+    assert student.patch(f"/api/v1/absence-cases/{case['id']}", json={"start_date": "2026-10-27"}).status_code in (404, 405)
+    mine = student.get("/api/v1/students/me/cases").json()[0]
+    assert mine["decision"] is None and mine["reported_missed_dates"] == ["2026-10-26"] and mine["legacy_requested_range"] is None
+    assert "requested_start" not in mine
+
+
+def test_reported_missed_dates_are_facts_not_certification(student, clinician, case):
+    view = clinician.get(f"/api/v1/clinician/absence-cases/{case['id']}").json()
+    assert view["reported_missed_dates"] == ["2026-10-26"] and view["decision"] is None
+    assert view["status"] in ("STUDENT_REQUESTED", "CLINICIAN_REVIEW")  # nothing approved, nothing generated
+    assert clinician.post(f"/api/v1/clinician/absence-cases/{case['id']}/render", json={}).status_code == 409  # no document before a CERTIFY decision
+
+
+def test_clinician_can_certify_multi_day_decline_or_defer(clinician, case):
+    out = _certify(clinician, case["id"], "2026-10-27", "2026-10-30")
+    assert out["decision"]["start_date"] == "2026-10-27" and out["decision"]["end_date"] == "2026-10-30" and out["status"] == "DATES_SET"
+    for decision, status in (("DEFER", "DEFERRED"), ("DECLINE", "REJECTED")):
+        r = clinician.post(f"/api/v1/clinician/absence-cases/{case['id']}/decision", json={"decision": decision})
+        assert r.json()["status"] == status and r.json()["decision"]["start_date"] is None

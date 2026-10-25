@@ -185,6 +185,7 @@ class EncounterRow(BaseModel):
 
 
 class ClinicianDashboard(BaseModel):
+    previsit_notes: list[dict] = Field(default_factory=list)
     today: str
     display_name: str
     appointments_today: int

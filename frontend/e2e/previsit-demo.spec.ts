@@ -82,17 +82,18 @@ test('two conversations → separate approved summaries → book Dr. Rivera from
   await doc.getByText('Sam Lee').first().click()
   const caseUrl = doc.url()
   await expect(doc.getByRole('heading', { name: 'AI-Assisted Pre-Visit Summary — Student-Reported Information' })).toBeVisible()
-  const summary = doc.locator('section', { has: doc.getByRole('heading', { name: 'AI-Assisted Pre-Visit Summary — Student-Reported Information' }) })
+  const summary = doc.locator('section[aria-labelledby="pvs-title"]')
   await expect(summary.getByText('100.8°F').first()).toBeVisible()
   await expect(summary.getByText('Requested — not medically approved').first()).toBeVisible()
   await expect(summary.getByText(/rash/i)).toHaveCount(0)
-  const history = doc.locator('section', { has: doc.getByRole('heading', { name: 'AI-Assisted Pre-Visit History — Sam Lee' }) })
+  await expect(doc.getByRole('heading', { name: 'AI-Assisted Pre-Visit Notes', exact: true })).toBeVisible()
+  const history = doc.locator('section[aria-labelledby="history-title"]')
   await expect(history.getByRole('button', { name: /Session 2/ })).toBeVisible()
   await expect(history.getByText('Latest approved')).toBeVisible()
   await history.getByRole('button', { name: /Session 1/ }).click()
   await expect(history.getByText(/rash on my arm/i).first()).toBeVisible()
   await expect(history.getByAltText(/Student-approved photo/)).toBeVisible()
-  await expect(history.getByRole('heading', { level: 3 })).toHaveCount(1) // same day: one date group, two separate sessions
+  await expect(history.getByRole('heading', { level: 4 })).toHaveCount(1) // same day: one date group, two separate sessions
   await expect(doc.getByRole('heading', { name: 'Absence determination', exact: true })).toBeVisible() // the clinician decides independently
   await doc.close()
 

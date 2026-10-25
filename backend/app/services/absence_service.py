@@ -85,6 +85,22 @@ def recipients(db: Session, student_id: str, impact: Impact) -> list[dict]:
     return out
 
 
+def course_contacts(db: Session, student: User) -> list[dict]:
+    """Selected-term courses in the same shape as recipients (no dates): contact status the student can fix."""
+    term = terms.selected(db, student)
+    rows = db.scalars(select(Course).where(Course.student_id == student.id, (Course.term == term) | Course.term.is_(None) if term else True).order_by(Course.code)).all()
+    out = []
+    for c in rows:
+        reason = None
+        if c.contact_status not in DELIVERABLE_CONTACT:
+            reason = "Contact needs review" if c.contact_status == "NEEDS_REVIEW" else "Contact needed"
+        elif not domain_allowed(c.instructor_email):
+            reason = "Not on the demo test allowlist"
+        out.append({"course_id": c.id, "course_code": c.code, "course_title": c.title, "instructor_name": c.instructor_name, "email": c.instructor_email,
+                    "contact_status": c.contact_status, "deliverable": reason is None, "blocked_reason": reason, "dates": [], "meetings": 0})
+    return out
+
+
 def _fill(template: str, values: dict) -> str:
     for k, v in values.items():
         template = template.replace("{" + k + "}", str(v))

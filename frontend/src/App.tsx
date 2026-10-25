@@ -18,9 +18,10 @@ import EncounterCase from './pages/clinician/EncounterCase'
 import ClinicianActivity from './pages/clinician/ClinicianActivity'
 import { AbsenceCases, DocumentReview, IntakeQueue, SignatureSettings } from './pages/clinician/ClinicianLists'
 import TestInbox from './pages/TestInbox'
+import { Logo } from './components/Logo'
 
 function Splash() {
-  return <main className="grid min-h-screen place-items-center bg-[#f5faf9]" role="status" aria-live="polite"><div className="grid size-12 animate-pulse place-items-center rounded-xl bg-teal-400 font-black text-[#0c2f3b]">C</div><span className="sr-only">Loading CuraLink…</span></main>
+  return <main className="grid min-h-screen place-items-center bg-[#f5faf9]" role="status" aria-live="polite"><Logo size={56} decorative className="animate-pulse"/><span className="sr-only">Loading CuraLink…</span></main>
 }
 
 /** UX-only guard. The server enforces the same rule on every API call (403). */
