@@ -1,0 +1,9 @@
+# Never upload local configuration or data to Vercel (e.g. .env.local points at a LOCAL Convex backend).
+.env
+.env.*
+.convex
+node_modules
+dist
+test-results
+playwright-report
+e2e

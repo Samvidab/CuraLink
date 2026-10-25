@@ -1,4 +1,55 @@
-# CuraLink — Public Deployment Plan (and where Convex fits)
+# CuraLink — Public Deployment (Vercel + Convex + Vultr)
+
+Status: **prepared, not yet deployed.** URLs are added here only after the deployed app has been tested.
+
+## Architecture (chosen by the team)
+
+```
+Browser ──HTTPS──> Vercel (React build)
+   │                 └─ /api/* proxied to Vultr, adding x-origin-secret (cookies stay first-party)
+   ├──WSS (voice, single-use 60 s ticket)──> Vultr: Caddy (HTTPS) ─> FastAPI (Docker, internal only) ─> SQLite on /opt/curalink/data
+   └──Convex client (RS256 token from /api/v1/convex/token)──> Convex: authorized, real-time synchronized records
+                                                                  ^ written only by FastAPI (CONVEX_SYNC_SECRET)
+```
+
+- **FastAPI on Vultr is the transactional system of record.** It runs the booking locks, consent gates, signing policy, Claude/Cartesia calls, PDFs, HEIC and signatures. All of that stays in the tested Python code; nothing was rewritten.
+- **Convex holds a persistent, synchronized copy of every listed record type:** users, clinician profiles and availability, appointments, conversation sessions, versioned pre-visit summaries, clinician findings, absence cases with consent, clinician absence decisions, document versions with signing records, and deliveries.
+  - **Read access is enforced inside Convex queries** (`frontend/convex/access.ts`): the owning student, clinicians assigned to an active appointment (with consent in effect), or public directory data. Clinician-only fields such as the private rationale are stripped for students. Intake drafts are never visible to clinicians.
+  - **Never stored in Convex:** password hashes, session tokens, signature images, PDF bytes, photo bytes, sign nonces.
+- **Real-time:** each browser subscribes to `live.cursor`, a change cursor scoped to what that user may read, and refreshes open screens when it moves. A clinician sees a new summary within seconds without reloading.
+- **Local development is unchanged.** Sync is off unless `CONVEX_SITE_URL` and `CONVEX_SYNC_SECRET` are set, and the frontend uses Convex only when `VITE_CONVEX_URL` is set *and* the API reports sync is on.
+
+### Environment variables (names only)
+
+| Where | Variables |
+|---|---|
+| Vultr `/opt/curalink/curalink.env` (chmod 600) | `ENVIRONMENT`, `DEMO_MODE`, `DEMO_CONTROLS`, `DEMO_ADMIN_TOKEN`, `PUBLIC_API_URL`, `CORS_ORIGINS`, `ORIGIN_SECRET`, `SIGNATURE_ENCRYPTION_KEY`, `ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`, `CONVEX_SITE_URL`, `CONVEX_SYNC_SECRET`, `EMAIL_DELIVERY_MODE`, `TEST_EMAIL_ALLOWLIST`, `DEMO_INBOX_REDIRECT` |
+| Vercel (Production) | `VITE_CONVEX_URL` (public by design), `ORIGIN_SECRET` (used only by the routing layer, never bundled) |
+| Convex deployment | `CURALINK_SYNC_SECRET` (same value as `CONVEX_SYNC_SECRET`), `CURALINK_JWT_ISSUER` (= `PUBLIC_API_URL`) |
+
+`VITE_*` values are visible in the browser bundle; none of them is secret. API keys exist only on the Vultr server.
+
+### Deploy steps
+
+1. **Vultr (you):** create a Cloud Compute instance (Ubuntu 24.04 LTS, 1 vCPU / 2 GB) with your SSH key. Check the price on the confirmation page.
+2. **Provision:** `ssh root@IP 'bash -s' < deploy/vultr/provision.sh`. This sets up the `deploy` user, key-only SSH, ufw (22/80/443), fail2ban, unattended upgrades, Docker, and nightly SQLite backups.
+3. **Server env:** fill `deploy/vultr/curalink.env.template` on the server as `/opt/curalink/curalink.env` (`install -m 600`).
+4. **Ship and start:** `deploy/vultr/deploy.sh IP API_HOST`. `API_HOST` can be `IP-with-dashes.sslip.io` for automatic HTTPS without buying a domain.
+5. **Convex:** `cd frontend && npx convex login`, then `npx convex deploy`. Set `CURALINK_SYNC_SECRET` and `CURALINK_JWT_ISSUER` with `npx convex env set --prod`.
+6. **Vercel:** in `frontend/`, link the project, set `VITE_CONVEX_URL` and `ORIGIN_SECRET` for Production, then `vercel deploy --prod`. `frontend/vercel.json` carries the `/api` proxy to `API_HOST`.
+7. **Verify:** check health, then run the browser tests against the public URL (section 5).
+
+### Rollback
+
+- **API:** check out the previous commit locally and run `deploy/vultr/deploy.sh IP API_HOST` again (the server keeps no Git checkout). Data stays in `/opt/curalink/data`, which has nightly backups in `data/backups`.
+- **Frontend:** in the Vercel dashboard → Deployments → previous deployment → *Promote to Production* (instant).
+- **Convex:** redeploy functions from the previous commit (`npx convex deploy`). Synced data can always be rebuilt from the API with `python -m app.admin convex-sync`.
+- **Kill switch:** unset `CONVEX_SITE_URL` on the server and restart. The app keeps working without real-time sync.
+
+---
+
+# Earlier analysis (single-container option and Convex capabilities)
+
 
 Status: **prepared, not deployed.** Nothing in this document has been published. Deploy only after the team approves it.
 

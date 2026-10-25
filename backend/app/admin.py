@@ -2,6 +2,7 @@
 
     uv run python -m app.admin verify-clinician doctor@clinic.example.com
     uv run python -m app.admin seed-availability     # add MISSING demo clinician hours; resets nothing
+    uv run python -m app.admin convex-sync           # push every current record to Convex (CONVEX_* settings required)
 
 Verification is the ONLY way a clinician account gains clinician access.
 """
@@ -18,6 +19,15 @@ from app.services import audit
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["convex-sync"]:
+        from app.services import convex_bridge
+
+        if not convex_bridge.enabled():
+            print("CONVEX_SITE_URL and CONVEX_SYNC_SECRET are not set.")
+            return 1
+        dbmod.create_all()
+        print(f"Pushed {convex_bridge.full_sync()} records to Convex.")
+        return 0
     if argv == ["seed-availability"]:
         from app.services.availability import ensure_demo_data
 

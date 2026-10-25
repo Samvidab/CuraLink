@@ -174,7 +174,8 @@ export class VoiceController {
     this.inCtx.createMediaStreamSource(this.micStream).connect(node)
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    this.ws = new WebSocket(`${proto}://${location.host}${this.info!.stream_path}`)
+    // Same host in development; a ticketed wss:// URL to the API host when the page is served elsewhere (Vercel).
+    this.ws = new WebSocket(this.info!.stream_url ?? `${proto}://${location.host}${this.info!.stream_path}`)
     this.ws.binaryType = 'arraybuffer'
     this.ws.onopen = () => {
       this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))

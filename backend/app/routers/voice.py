@@ -9,6 +9,9 @@ speech APIs where available and POSTs transcripts to /intake/messages.
 
 import json
 import logging
+import secrets
+import threading
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -38,6 +41,31 @@ def cartesia_enabled() -> bool:
     return bool(get_settings().cartesia_api_key)
 
 
+# Single-use, 60-second tickets for the voice WebSocket when the page is served from another host (e.g. Vercel,
+# which can't proxy WebSockets, so the browser connects to the API host directly and the session cookie isn't sent).
+_tickets: dict[str, tuple[str, float]] = {}
+_tickets_lock = threading.Lock()
+TICKET_TTL = 60
+
+
+def issue_ticket(user_id: str) -> str:
+    t = secrets.token_urlsafe(32)
+    now = time.monotonic()
+    with _tickets_lock:
+        for k in [k for k, (_, exp) in _tickets.items() if exp < now]:
+            _tickets.pop(k, None)
+        _tickets[t] = (user_id, now + TICKET_TTL)
+    return t
+
+
+def redeem_ticket(t: str | None) -> str | None:
+    if not t:
+        return None
+    with _tickets_lock:
+        entry = _tickets.pop(t, None)
+    return entry[0] if entry and entry[1] >= time.monotonic() else None
+
+
 @router.post("/voice/sessions", response_model=VoiceSessionOut)
 def create_voice_session(body: VoiceSessionIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> VoiceSessionOut:
     if not body.voice_consent:
@@ -53,6 +81,8 @@ def create_voice_session(body: VoiceSessionIn, user: User = Depends(require_stud
         session_id=sess.id,
         mode="cartesia" if live else "browser",
         stream_path="/api/v1/voice/stream" if live else None,
+        stream_url=(f"{s.public_api_url.rstrip('/').replace('https://', 'wss://', 1).replace('http://', 'ws://', 1)}/api/v1/voice/stream?ticket={issue_ticket(user.id)}"
+                    if live and s.public_api_url else None),
         input={"encoding": "pcm_s16le", "sample_rate": s.voice_input_sample_rate, "chunk_ms": 100},
         output={"encoding": "pcm_s16le", "sample_rate": s.voice_output_sample_rate},
         note="Cartesia streaming voice." if live else "Cartesia isn't configured on this server; using your browser's speech features where available. Audio stays on your device.",
@@ -73,6 +103,9 @@ async def voice_stream(ws: WebSocket) -> None:
     db = next(gen)
     try:
         user = user_for_token(db, ws.cookies.get(get_settings().session_cookie_name))
+        if user is None:
+            uid = redeem_ticket(ws.query_params.get("ticket"))
+            user = db.get(User, uid) if uid else None
         if not _origin_allowed(ws) or user is None or user.role != "student":
             await ws.close(code=4403)
             return

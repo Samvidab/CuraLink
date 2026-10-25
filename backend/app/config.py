@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     # Built frontend (frontend/dist) to serve from the API process: one same-origin deployable, so the
     # HttpOnly session cookie stays first-party and no cross-site CORS is needed.
     frontend_dist: Path | None = None
+    # Public HTTPS origin of THIS API (e.g. https://203-0-113-7.sslip.io). Used as the Convex token issuer and for
+    # the direct voice WebSocket URL when the frontend is hosted elsewhere (Vercel can't proxy WebSockets).
+    public_api_url: str | None = None
+    # Shared secret Vercel adds to every proxied /api request (x-origin-secret); requests that bypass Vercel are
+    # refused. Exempt: /api/v1/health and the ticket-authenticated voice WebSocket.
+    origin_secret: str | None = None
+    # Where generated keys live (Convex token signing key). Production: on the persistent volume.
+    secrets_dir: Path = REPO_ROOT / "backend" / ".secrets"
+
+    # CURALINK_CONFIG: CONVEX
+    # Convex keeps a persistent, real-time synchronized copy of committed records (frontend/convex). The backend
+    # writes with CONVEX_SYNC_SECRET (also set in the Convex deployment as CURALINK_SYNC_SECRET); browsers read with
+    # short-lived RS256 tokens from GET /api/v1/convex/token. Unset -> sync off (local development unchanged).
+    convex_site_url: str | None = None  # https://<deployment>.convex.site
+    convex_sync_secret: str | None = None
 
     # Delivery never leaves this allowlist in demo mode.
     test_email_allowlist: str = "example.com"

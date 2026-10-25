@@ -10,6 +10,7 @@ export interface Health {
   demo_today: string
   integrations: { clinic_inventory: 'demo'; email_delivery: 'test_only'; llm: 'live' | 'fallback' | 'error'; voice: 'live' | 'fallback' }
   llm_detail?: LlmError | null
+  convex?: { enabled: boolean; last_ok?: number | null; last_error?: string | null; records_pushed?: number }
 }
 
 export interface Me {
@@ -205,7 +206,7 @@ export interface IntakeReply {
   schedule?: ScheduleResult | null
 }
 export interface LlmError { category: string; http_status: number | null; error_type: string | null; message: string }
-export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
+export interface VoiceSessionInfo { session_id: string; mode: 'cartesia' | 'browser'; stream_path: string | null; stream_url?: string | null; input: { encoding: string; sample_rate: number; chunk_ms: number }; output: { encoding: string; sample_rate: number }; note: string }
 export interface Handoff { packet_id: string; encounter_id: string | null; session_id?: string | null; version: number; status: string; shared_at: string; field_keys: string[]; attachment_ids: string[]; consent_text?: string | null; clinician_name?: string | null }
 export interface StudentEncounter { id: string; appointment_id: string | null; starts_at: string; visit_type: string; clinician_name: string; status: string; handoff: Handoff | null; source_mode: SourceMode }
 export interface ClinicianIntake { encounter_id: string; status: 'NOT_SHARED' | 'SHARED' | 'WITHDRAWN'; packet_id: string | null; version: number | null; shared_at: string | null; fields: IntakeField[]; consent: Record<string, boolean>; attachments: PhotoAttachment[]; annotations: Record<string, { decision: 'accepted' | 'corrected' | 'rejected'; corrected_value: string | null; note: string | null; at: string }>; summary?: PreVisitSummary | null; consent_text?: string | null; session?: { session_id: string; started_at: string | null; ended_at: string | null; intake_complete: boolean; version: number } | null }
