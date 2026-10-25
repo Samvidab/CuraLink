@@ -48,6 +48,13 @@ class Settings(BaseSettings):
 
     # Delivery never leaves this allowlist in demo mode.
     test_email_allowlist: str = "example.com"
+    # CURALINK_CONFIG: DEMO_TEST_INBOX
+    # Real-looking instructor addresses (e.g. from a UniTime export) are NEVER contacted in the demo. With this on,
+    # a delivery the clinician approved for such an instructor is written to the isolated in-app test inbox under a
+    # fictional alias (<course>.instructor@DEMO_INBOX_DOMAIN); the real address is kept only as display data.
+    # Off -> those recipients are shown as "not permitted for demo delivery" and nothing is written.
+    demo_inbox_redirect: bool = True
+    demo_inbox_domain: str = "test-inbox.example.com"
 
     # Optional integrations. Absent keys => clearly labelled fallbacks.
     # CURALINK_CONFIG: ANTHROPIC_API_KEY

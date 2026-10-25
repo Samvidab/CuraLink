@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, Card, ErrorBanner, Icon, LoadingBlock, SourceBadge } from '../../components/ui'
 import { ClinicianCard, SlotConfirmDialog } from '../../components/ClinicianSlots'
+import { useIntake } from '../../components/IntakePanel'
 import { api } from '../../lib/api'
 import { fmtDay, fmtRange } from '../../lib/format'
 import type { AppointmentSummary, ClinicianListing, ConfirmResult, ScheduleResult, ScheduleSlot } from '../../lib/types'
@@ -22,6 +23,11 @@ export default function FindCare() {
   const go = useNavigate()
   const qc = useQueryClient()
   const [service, setService] = useState('routine_checkup')
+  const intake = useIntake()
+  // Pre-select the type that fits the open conversation (symptoms / absence request -> general consultation).
+  const suggested = intake.data?.suggested_appointment_type ?? null
+  const [touched, setTouched] = useState(false)
+  useEffect(() => { if (suggested && !touched) setService(suggested) }, [suggested, touched])
   const [view, setView] = useState<View>('all')
   const [clinician, setClinician] = useState('')
   const [specialty, setSpecialty] = useState('')
@@ -56,8 +62,8 @@ export default function FindCare() {
 
   return <><h1 className="text-3xl font-semibold">Find care</h1><p className="mt-2 text-slate-500">Choose a clinician and a time that fits around your classes.</p><div className="mt-5 rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800"><b>Demo availability:</b> Clinicians and their hours are fictional and not connected to a university clinic. CuraLink ranks times only by fit with your schedule — never by medical urgency.</div>
     {notice&&<div role="alert" className="mt-4 flex items-start justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span>{notice}</span><button onClick={()=>setNotice('')} aria-label="Dismiss" className="text-amber-700">×</button></div>}
-    {active.length>0&&<Card className="mt-6 p-5"><Badge tone="blue">Your demo appointment{active.length>1?'s':''}</Badge><ul className="mt-2 space-y-2">{active.map(a=><li key={a.id} className="flex flex-wrap items-center justify-between gap-3 text-sm"><span><b>{a.clinician_name ?? a.clinic_name}</b> · {typeLabel[a.appointment_type] ?? a.appointment_type} · {fmtDay(a.starts_at)} · {fmtRange(a.starts_at,a.ends_at)} · {a.clinic_name}</span><Button variant="danger" disabled={cancel.isPending} onClick={()=>cancel.mutate(a.id)}>Cancel demo booking</Button></li>)}</ul></Card>}
-    <h2 className="mt-8 text-lg font-semibold">What do you need?</h2><div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{(listing.data?.appointment_types ?? []).map(s=><button key={s.id} onClick={()=>{setService(s.id);setChoice(null)}} aria-pressed={service===s.id} className={`rounded-2xl border p-4 text-left text-sm font-semibold transition ${service===s.id?'border-teal-500 bg-teal-50 text-teal-800':'border-slate-200 bg-white hover:border-teal-300'}`}>{s.label}</button>)}{listing.isLoading&&<LoadingBlock className="h-14 sm:col-span-2 lg:col-span-4"/>}</div>
+    {active.length>0&&<Card className="mt-6 p-5"><Badge tone="blue">Your demo appointment{active.length>1?'s':''}</Badge><ul className="mt-2 space-y-2">{active.map(a=><li key={a.id} className="flex flex-wrap items-center justify-between gap-3 text-sm"><span><b>{a.clinician_name ?? a.clinic_name}</b> · {typeLabel[a.appointment_type] ?? a.appointment_type} · {fmtDay(a.starts_at)} · {fmtRange(a.starts_at,a.ends_at)} · {a.clinic_name}<PurposeLine a={a}/></span><Button variant="danger" disabled={cancel.isPending} onClick={()=>cancel.mutate(a.id)}>Cancel demo booking</Button></li>)}<p className="mt-3 text-xs text-slate-500">To change the appointment type or time, cancel and book again.</p></ul></Card>}
+    <h2 className="mt-8 text-lg font-semibold">What do you need?</h2><div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{(listing.data?.appointment_types ?? []).map(s=><button key={s.id} onClick={()=>{setService(s.id);setTouched(true);setChoice(null)}} aria-pressed={service===s.id} className={`rounded-2xl border p-4 text-left text-sm font-semibold transition ${service===s.id?'border-teal-500 bg-teal-50 text-teal-800':'border-slate-200 bg-white hover:border-teal-300'}`}>{s.label}</button>)}{listing.isLoading&&<LoadingBlock className="h-14 sm:col-span-2 lg:col-span-4"/>}</div>
     <div className="mt-7 flex flex-wrap gap-2" role="tablist" aria-label="Browse by">{VIEWS.map(([v,label])=><button key={v} role="tab" aria-selected={view===v} onClick={()=>{setView(v);setChoice(null)}} className={`min-h-10 rounded-full border px-4 text-sm font-semibold transition ${view===v?'border-teal-600 bg-teal-700 text-white':'border-slate-200 bg-white text-slate-700 hover:border-teal-300'}`}>{label}</button>)}</div>
     <div className="mt-5 grid gap-5 lg:grid-cols-[.65fr_1.35fr]"><Card className="h-fit p-5">
       {view==='clinician'&&<label className="mb-4 block text-sm font-semibold">Clinician<select className="input mt-2" value={chosenClinician ?? ''} onChange={e=>{setClinician(e.target.value);setChoice(null)}}>{(listing.data?.clinicians ?? []).map(c=><option key={c.clinician_id} value={c.clinician_id}>{c.name} — {c.specialty}</option>)}</select></label>}
@@ -76,6 +82,17 @@ export default function FindCare() {
         {excluded.length>0&&<details className="rounded-xl border border-slate-200 bg-white p-4 text-sm"><summary className="cursor-pointer font-semibold">Why some times aren’t shown</summary><ul className="mt-3 space-y-1">{excluded.map(([k,n])=><li key={k} className="flex justify-between gap-2"><span>{REJECTED[k] ?? k}</span><span className="text-slate-500">{n}</span></li>)}</ul></details>}
       </div></div>
     <details className="mt-6 text-sm text-slate-500"><summary className="cursor-pointer">Demo controls</summary><p className="mt-2">Simulate another student booking the selected time to show stale-slot recovery.</p><Button variant="secondary" className="mt-2" disabled={!choice||takeAsOther.isPending} onClick={()=>choice&&takeAsOther.mutate(choice.id)}>Mark selected slot as taken</Button></details>
-    {dialog&&choice&&<SlotConfirmDialog slot={choice} onClose={()=>setDialog(false)} onBooked={r=>{setDialog(false);setConfirmed(r)}} onStale={m=>{setDialog(false);setChoice(null);setNotice(m)}}/>}
+    {dialog&&choice&&<SlotConfirmDialog slot={choice} intakeSessionId={intake.data?.session_id} purpose={intake.data?.purpose} absence={intake.data?.absence_requested} onClose={()=>setDialog(false)} onBooked={r=>{setDialog(false);setConfirmed(r)}} onStale={m=>{setDialog(false);setChoice(null);setNotice(m)}}/>}
   </>
+}
+
+/** The student's own reason for visit on an existing booking: shown, and correctable (never a raw transcript). */
+function PurposeLine({ a }: { a: AppointmentSummary }) {
+  const qc = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(a.purpose ?? '')
+  const [absence, setAbsence] = useState(!!a.absence_requested)
+  const save = useMutation({ mutationFn: () => api.patch(`/appointments/${a.id}`, { purpose: text, absence_requested: absence }), onSuccess: () => { setEditing(false); qc.invalidateQueries({ queryKey: ['my-appointments'] }) } })
+  if (editing) return <span className="mt-2 block rounded-lg bg-slate-50 p-2"><label className="block text-xs font-semibold">Reason for visit (your words)<input value={text} maxLength={300} onChange={e=>setText(e.target.value)} className="input mt-1" placeholder="e.g. headache and fever; absence note"/></label><label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={absence} onChange={e=>setAbsence(e.target.checked)} className="size-4 accent-teal-700"/>I’d like to discuss absence documentation (a request, not an approval)</label><span className="mt-2 flex gap-2"><Button className="min-h-8 py-1 text-xs" disabled={save.isPending} onClick={()=>save.mutate()}>Save</Button><Button variant="ghost" className="min-h-8 py-1 text-xs" onClick={()=>setEditing(false)}>Cancel</Button></span></span>
+  return <span className="mt-1 block text-xs text-slate-500">Reason: {a.purpose ? `“${a.purpose}”${a.purpose_confirmed ? '' : ' (not confirmed by you)'}` : 'not given'}{a.absence_requested ? ' · absence documentation requested' : ''} <button className="font-semibold text-teal-700 underline" onClick={()=>setEditing(true)}>Edit</button></span>
 }

@@ -156,6 +156,7 @@ class Appointment(Base):
     intake_session_id: Mapped[str | None] = mapped_column(ForeignKey("intake_sessions.id"), nullable=True)
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
     absence_requested: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    purpose_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # entered/confirmed by the student (older rows: NULL)
 
 
 class Encounter(Base):
@@ -374,6 +375,7 @@ class Delivery(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     receipt_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    intended_recipient: Mapped[str | None] = mapped_column(String, nullable=True)  # the instructor's real address: display only, never contacted
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -391,6 +393,7 @@ class TestInboxMessage(Base):
     body: Mapped[str] = mapped_column(Text)
     attachment_name: Mapped[str] = mapped_column(String)
     attachment_sha256: Mapped[str] = mapped_column(String)
+    intended_recipient: Mapped[str | None] = mapped_column(String, nullable=True)  # who this simulates; NOT contacted
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

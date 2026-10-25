@@ -114,7 +114,8 @@ def _impact_out(impact, recips: list[dict]) -> dict:
 
 def _deliveries(db: Session, case_id: str) -> list[dict]:
     rows = db.scalars(select(Delivery).where(Delivery.case_id == case_id).order_by(Delivery.queued_at)).all()
-    return [{"id": d.id, "course_code": d.course_code, "destination": d.destination, "state": d.state, "attempts": d.attempts, "error_code": d.error_code, "receipt_id": d.receipt_id, "sent_at": d.sent_at, "version_id": d.version_id} for d in rows]
+    return [{"id": d.id, "course_code": d.course_code, "destination": d.destination, "intended_recipient": d.intended_recipient, "simulated": bool(d.intended_recipient),
+             "state": d.state, "attempts": d.attempts, "error_code": d.error_code, "receipt_id": d.receipt_id, "sent_at": d.sent_at, "version_id": d.version_id} for d in rows]
 
 
 def _timeline(db: Session, case: AbsenceCase) -> list[dict]:
@@ -160,6 +161,7 @@ def student_case_out(db: Session, case: AbsenceCase) -> dict:
         "disclosure_consent": case.disclosure_consent and case.consent_revoked_at is None, "consent_revoked_at": case.consent_revoked_at,
         "decision": {"decision": d.decision, "start_date": d.start_date, "end_date": d.end_date} if d else None,
         "document": {"version": v.version, "state": v.state, "signed_at": v.signed_at} if v else None,
+        "delivery": svc.delivery_readiness(db, case, v),  # same persisted records the clinician sees
         "deliveries": _deliveries(db, case.id), "timeline": (tl := _timeline(db, case)), "created_at": case.created_at,
         "excused_status": "UNKNOWN — decided by your university",
         "metrics": _metrics(tl, case),
@@ -190,6 +192,7 @@ def clinician_case_out(db: Session, case: AbsenceCase, clinician: User) -> dict:
             "signed": bool(v and v.state == "SIGNED"),
             "recipients_verified": bool(v and all(m["deliverable"] for m in v.content["messages"] if m["include"])),
         },
+        "delivery": svc.delivery_readiness(db, case, v),
         "deliveries": _deliveries(db, case.id), "timeline": _timeline(db, case),
     }
 
@@ -498,7 +501,8 @@ def test_inbox(user: User = Depends(current_user), db: Session = Depends(get_db)
     else:
         q = q.join(Encounter, AbsenceCase.encounter_id == Encounter.id).where(Encounter.clinician_id == user.id)
     rows = db.scalars(q.order_by(TestInboxMessage.received_at.desc()).limit(50)).all()
-    return [{"id": m.id, "to": m.to, "subject": m.subject, "body": m.body, "attachment_name": m.attachment_name, "attachment_sha256": m.attachment_sha256, "received_at": m.received_at} for m in rows]
+    return [{"id": m.id, "to": m.to, "intended_recipient": m.intended_recipient, "subject": m.subject, "body": m.body, "attachment_name": m.attachment_name,
+             "attachment_sha256": m.attachment_sha256, "received_at": m.received_at} for m in rows]
 
 
 @router.post("/demo/transport/fail-next", dependencies=[Depends(demo_admin)])

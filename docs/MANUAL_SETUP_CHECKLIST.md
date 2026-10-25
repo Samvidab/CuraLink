@@ -120,6 +120,14 @@ No other credentials are needed for the hackathon. Clinic availability, email de
 
 ---
 
+### C5. Instructor delivery in the demo 🟢
+- **Statuses:** three separate checks, shown the same way in both portals (`absence_service.delivery_readiness`):
+  1. **Instructor contact:** *Confirmed by student*, *Verified*, *Student confirmation missing*, or *Recipient email unverified*.
+  2. **Demo route:** *Test address*; *Simulated: isolated test inbox* (the real address is never contacted); or *Not permitted for demo delivery*.
+  3. **Case gates:** student consent, signature validity (*Document version changed after signing*, *Recipients changed after signing*), and *Delivery failed*.
+- **Real-looking addresses** (for example `@purdue.edu` from UniTime) are display data only. With `DEMO_INBOX_REDIRECT=true` (the default, marker `DEMO_TEST_INBOX`), approved copies go to `<course>.instructor@test-inbox.example.com` in the in-app test inbox.
+- **Re-signing** is needed only when the signed content or a signed recipient address changes. A blocked or redirected route never voids a signature.
+
 ## D. Production-only information 🔵 (do not fake these)
 
 | Item | Where | Status |

@@ -150,10 +150,12 @@ def test_absence_note_request_is_recorded_as_a_request_on_the_booking(student, c
     student.post("/api/v1/calendars/import-sample")
     r = say(student, "I need to see a doctor about an absence note")
     assert r["schedule"]
-    out = book(student)
-    assert out["absence_requested"] and out["purpose"] == "I need to see a doctor about an absence note" and out["intake_session_id"] == snap(student)["session_id"]
+    s = snap(student)
+    assert s["purpose"] == "Discuss absence documentation" and s["suggested_appointment_type"] == "general_consultation"  # concise suggestion, not the sentence
+    out = book(student, purpose=s["purpose"])  # what the booking dialog submits after the student confirms or edits it
+    assert out["absence_requested"] and out["purpose"] == "Discuss absence documentation" and out["purpose_confirmed"] and out["intake_session_id"] == s["session_id"]
     detail = clinician.get(f"/api/v1/clinician/encounters/{out['case_id']}").json()
-    assert detail["absence_requested"] and detail["purpose"].startswith("I need to see a doctor")
+    assert detail["absence_requested"] and detail["purpose"] == "Discuss absence documentation" and detail["purpose_confirmed"]
     assert clinician.get("/api/v1/clinician/absence-cases").json() == [] or all(c["student_name"] != "Sam Lee" for c in clinician.get("/api/v1/clinician/absence-cases").json())
 
 
@@ -426,3 +428,31 @@ def test_acceptance_two_conversations_persist_for_rivera_across_logins(app, logi
     assert by_id[s2]["summary"]["measurements"] == [] and "rash" in by_id[s2]["summary"]["chief_concern"].lower()
     hale, _ = login("dr.hale@clinic.example.com")
     assert hale.get(f"/api/v1/clinician/encounters/{out['case_id']}/intake").status_code == 403
+
+
+
+def test_voice_noise_never_becomes_the_appointment_purpose(student, clinician):
+    """Regression (live demo): a garbled voice fragment was stored verbatim as the appointment purpose."""
+    student.post("/api/v1/calendars/import-sample")
+    sid = snap(student)["session_id"]
+    student.patch(f"/api/v1/intake/sessions/{sid}/consent", json={"voice_consent": True})
+    say(student, "My head hurts really bad. - Whatever.", channel="voice")
+    assert say(student, "-", channel="voice")["assistant_message"] == "Sorry, I didn't catch that."
+    say(student, "Wow, that was the most damn good thing on the day. - Whatever. - Whatever. Yes, fine. Find an appointment for me.", channel="voice")
+    s = snap(student)
+    assert s["purpose"] == "Visit about symptoms I reported" and "Whatever" not in s["purpose"]
+    assert s["suggested_appointment_type"] == "general_consultation"  # headache reported -> not a routine checkup
+    assert all(t["text"] != "-" for t in s["transcript"])
+    out = book(student, key="voice-noise-01")  # booked without confirming a purpose
+    assert out["purpose"] is None and not out["purpose_confirmed"]
+    fixed = student.patch(f"/api/v1/appointments/{out['appointment_id']}", json={"purpose": "Headache and fever; absence note", "absence_requested": True}).json()
+    assert fixed["purpose"] == "Headache and fever; absence note" and fixed["purpose_confirmed"] and fixed["absence_requested"]
+    assert clinician.get(f"/api/v1/clinician/encounters/{out['case_id']}").json()["purpose"] == "Headache and fever; absence note"
+    other = _client_for_other(student)
+    assert other.patch(f"/api/v1/appointments/{out['appointment_id']}", json={"purpose": "x"}).status_code == 404
+
+
+def _client_for_other(student):
+    c = _client(student.app)
+    c.post("/api/v1/auth/login", json={"email": "jordan.kim@students.example.com", "password": "curalink-demo"})
+    return c

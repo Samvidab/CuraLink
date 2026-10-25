@@ -192,10 +192,11 @@ def confirm(body: ConfirmIn, user: User = Depends(require_student), db: Session 
         raise ApiError(409, "CLASS_CONFLICT", "This time overlaps with your schedule or another appointment. Pick another option.", details={"conflicts": [c.label.removeprefix("Personal: ") for c in conflicts]})
     sess = _booking_session(db, user, body.intake_session_id)
     slot = availability.book(db, cand, profile)
-    purpose = (body.purpose or "").strip() or (sess.purpose if sess else None)
+    # Only what the student confirmed in the booking dialog; a conversation's suggestion is never copied silently.
+    purpose = (body.purpose or "").strip() or None
     absence = body.absence_requested if body.absence_requested is not None else bool(sess and sess.absence_requested)
     appt = Appointment(id=f"apt_{uuid4().hex[:10]}", student_id=user.id, slot_id=slot.id, clinician_id=cand.clinician_id, appointment_type=cand.appointment_type, state="DEMO_CONFIRMED",
-                       confirmation_mode="demo", idempotency_key=body.idempotency_key, intake_session_id=sess.id if sess else None, purpose=purpose, absence_requested=absence)
+                       confirmation_mode="demo", idempotency_key=body.idempotency_key, intake_session_id=sess.id if sess else None, purpose=purpose, absence_requested=absence, purpose_confirmed=bool(purpose))
     db.add(appt)
     db.flush()
     enc = Encounter(id=f"enc_{uuid4().hex[:10]}", student_id=user.id, clinician_id=cand.clinician_id, appointment_id=appt.id, starts_at=cand.starts_at, visit_type=TYPE_LABEL.get(cand.appointment_type, cand.appointment_type), status="UPCOMING")
@@ -229,13 +230,34 @@ def _confirm_out(db: Session, appt: Appointment, tz: str, message: str) -> dict:
     slot = db.get(ClinicSlot, appt.slot_id)
     enc = db.scalar(select(Encounter).where(Encounter.appointment_id == appt.id))
     return {"appointment_id": appt.id, "status": appt.state, "external_booking": False, "appointment": appointment_summary(appt, slot, tz, db).model_dump(), "message": message,
-            "case_id": enc.id if enc else None, "intake_session_id": appt.intake_session_id, "purpose": appt.purpose, "absence_requested": bool(appt.absence_requested)}
+            "case_id": enc.id if enc else None, "intake_session_id": appt.intake_session_id, "purpose": appt.purpose, "purpose_confirmed": bool(appt.purpose_confirmed), "absence_requested": bool(appt.absence_requested)}
 
 
 @router.get("/appointments/me", response_model=list[AppointmentSummary])
 def my_appointments(user: User = Depends(require_student), db: Session = Depends(get_db)) -> list[AppointmentSummary]:
     rows = db.execute(select(Appointment, ClinicSlot).join(ClinicSlot).where(Appointment.student_id == user.id).order_by(ClinicSlot.starts_at)).all()
     return [appointment_summary(a, s, user.timezone, db) for a, s in rows]
+
+
+class AppointmentEditIn(BaseModel):
+    purpose: str | None = Field(None, max_length=300)
+    absence_requested: bool | None = None
+
+
+@router.patch("/appointments/{appointment_id}")
+def edit_appointment(appointment_id: str, body: AppointmentEditIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
+    """The student corrects their own reason for visit / absence-documentation request. Type and time change only by
+    rebooking (they decide duration and availability)."""
+    appt = db.get(Appointment, appointment_id)
+    if appt is None or appt.student_id != user.id or appt.state != "DEMO_CONFIRMED":
+        raise ApiError(404, "NOT_FOUND", "Appointment not found.")
+    if body.purpose is not None:
+        appt.purpose, appt.purpose_confirmed = body.purpose.strip() or None, bool(body.purpose.strip())
+    if body.absence_requested is not None:
+        appt.absence_requested = body.absence_requested
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DETAILS_UPDATED", object_type="appointment", object_id=appt.id)
+    db.commit()
+    return _confirm_out(db, appt, user.timezone, "Updated.")
 
 
 @router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentSummary)

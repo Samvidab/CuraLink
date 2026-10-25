@@ -123,11 +123,19 @@ def _schedule_context(db: Session, student: User):
     return names, last
 
 
+def suggested_type(sess: IntakeSession) -> str | None:
+    conv = sess.conversation or {}
+    if not conv.get("turn"):
+        return None
+    return _appointment_type_for(conv, conv.get("sched") or {})
+
+
 def _appointment_type_for(conv: dict, sched: dict) -> str:
     if sched.get("appointment_type"):
         return sched["appointment_type"]
     concerns = set(conv.get("concerns", []))
-    return "general_consultation" if "symptom" in concerns else "routine_checkup"
+    # Reported symptoms or an absence-documentation request: a general consultation, not a routine checkup.
+    return "general_consultation" if "symptom" in concerns or conv.get("absence_requested") else "routine_checkup"
 
 
 def _run_search(db: Session, student: User, conv: dict, sched: dict) -> dict:
@@ -179,6 +187,10 @@ def _remember(db: Session, sess: IntakeSession, conv: dict, client_turn_id: str 
 
 async def handle_message(db: Session, student: User, sess: IntakeSession, text: str, channel: str, history: list[dict], tool_handler, client_turn_id: str | None = None) -> Reply:
     text = (text or "").strip()[:2000]
+    if channel == "voice":
+        text = dialog.clean_transcript(text)
+        if not text:  # noise or a lone dash from speech recognition: don't store it or act on it
+            return Reply(sess.id, "Sorry, I didn't catch that.", sess.safety_state, None, [], mode="scripted", conversation_state=(sess.conversation or {}).get("state", "GREETING"), turn_id=client_turn_id)
     conv = dict(sess.conversation or dialog.blank())
     if client_turn_id and client_turn_id in conv.get("processed", {}):
         return Reply(**conv["processed"][client_turn_id])  # duplicate submit / repeated speech event: same answer, no re-processing

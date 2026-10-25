@@ -48,6 +48,7 @@ def snapshot(db: Session, sess: IntakeSession) -> IntakeSnapshot:
         conversation_state=(sess.conversation or {}).get("state", "GREETING"), declined=list((sess.conversation or {}).get("declined", [])), unknown=list((sess.conversation or {}).get("unknown", [])),
         transcript=list((sess.conversation or {}).get("transcript", [])), started_at=sess.created_at, ended_at=sess.ended_at,
         chief_concern=sess.chief_concern, purpose=sess.purpose, absence_requested=bool(sess.absence_requested),
+        suggested_appointment_type=intake_service.suggested_type(sess),
         summary=previsit.status_for_session(db, sess), linked_encounter_id=(e.id if (e := previsit.session_encounter(db, sess)) else None),
     )
 

@@ -53,7 +53,7 @@ def appointment_summary(appt: Appointment, slot: ClinicSlot, tz: str, db: Sessio
         id=appt.id, state=appt.state, clinician_id=clinician_id, clinician_name=doc.display_name if doc else None,
         appointment_type=appt.appointment_type or slot.appointment_type, clinic_name=slot.clinic_name,
         location=slot.location, starts_at=to_local(slot.starts_at, tz), ends_at=to_local(slot.ends_at, tz),
-        source_mode=slot.source_mode,
+        source_mode=slot.source_mode, purpose=appt.purpose, purpose_confirmed=bool(appt.purpose_confirmed), absence_requested=bool(appt.absence_requested),
     )
 
 
