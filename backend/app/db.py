@@ -18,8 +18,13 @@ _SessionLocal: sessionmaker[Session] | None = None
 def configure(database_url: str | None = None) -> Engine:
     """(Re)bind the engine. Tests call this with an in-memory URL."""
     global _engine, _SessionLocal
-    url = database_url or get_settings().database_url
+    url = normalize_url(database_url or get_settings().database_url)
+    if _engine is not None:
+        _engine.dispose()
     kwargs: dict = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {}
+    if url.startswith("postgresql"):
+        # Serverless-friendly: few connections per instance, verified before use (Neon closes idle ones).
+        kwargs = {"pool_size": 3, "max_overflow": 2, "pool_pre_ping": True, "pool_recycle": 300}
     if url == "sqlite://":
         from sqlalchemy.pool import StaticPool
 
@@ -34,6 +39,18 @@ def configure(database_url: str | None = None) -> Engine:
 
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
     return _engine
+
+
+def normalize_url(url: str) -> str:
+    """Neon/Vercel give postgres:// or postgresql:// URLs; SQLAlchemy needs the psycopg (v3) driver name."""
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
+def is_postgres() -> bool:
+    return engine().url.get_backend_name() == "postgresql"
 
 
 def engine() -> Engine:
@@ -60,6 +77,8 @@ def _relax_not_null(table: str, *columns: str) -> None:
     from sqlalchemy import inspect
     from sqlalchemy.schema import CreateTable
 
+    if engine().url.get_backend_name() != "sqlite":
+        return  # only SQLite needs a table rebuild to relax NOT NULL (fresh Postgres schemas are created nullable)
     insp = inspect(engine())
     cols = {c["name"]: c for c in insp.get_columns(table)}
     if all(c not in cols or cols[c]["nullable"] for c in columns):

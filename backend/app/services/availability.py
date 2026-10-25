@@ -193,7 +193,10 @@ def validate(db: Session, slot_id: str, now: datetime) -> tuple[Candidate, Clini
 
 
 def book(db: Session, cand: Candidate, profile: ClinicianProfile) -> ClinicSlot:
-    """Insert the booked interval; the write lock + unique index + post-insert overlap check prevent double-booking."""
+    """Insert the booked interval; the write lock + unique index + post-insert overlap check prevent double-booking.
+    On Postgres the clinician's profile row is locked first, so concurrent bookings for one clinician serialize
+    (SQLite already serializes all writers)."""
+    db.execute(select(ClinicianProfile.clinician_id).where(ClinicianProfile.clinician_id == profile.clinician_id).with_for_update())
     row = ClinicSlot(
         id=f"bk_{uuid4().hex[:12]}", clinic_id=profile.clinic_id, clinic_name=profile.clinic_name, location=profile.location or "",
         appointment_type=cand.appointment_type, starts_at=cand.starts_at, ends_at=cand.ends_at, travel_minutes=profile.travel_minutes,

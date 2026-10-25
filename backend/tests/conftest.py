@@ -1,3 +1,4 @@
+import os
 import pytest
 from fastapi.testclient import TestClient
 
@@ -22,9 +23,24 @@ def _no_live_integrations(monkeypatch):
     monkeypatch.setitem(llm_gateway.STATUS, "last_error", None)
 
 
+# Run the whole suite on Postgres with: TEST_DATABASE_URL=postgresql://... uv run pytest
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "sqlite://")
+
+
+def _end_leftover_pg_sessions() -> None:
+    """Postgres only: a test that inspected the DB directly may leave its session open in a transaction, and the next
+    test's DROP TABLE would wait on it forever. End every other connection to the test database first."""
+    import psycopg
+
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as c:
+        c.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()")
+
+
 @pytest.fixture()
 def app():
-    dbmod.configure("sqlite://")
+    if TEST_DATABASE_URL.startswith("postgres"):
+        _end_leftover_pg_sessions()
+    dbmod.configure(TEST_DATABASE_URL)
     gen = dbmod.get_db()
     reset_demo(next(gen))
     gen.close()

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app import db as dbmod
 from app.config import get_settings
@@ -24,16 +24,21 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 ORIGIN_EXEMPT = {"/api/v1/health", "/api/v1/voice/stream"}  # health checks; WebSocket uses a single-use ticket
 
 
-def _ensure_seeded() -> None:
-    dbmod.create_all()
+def _ensure_seeded() -> bool:
+    """Create/upgrade the schema; seed fictional demo data into an empty database. True if it seeded now."""
     gen = dbmod.get_db()
     db = next(gen)
+    if dbmod.is_postgres():
+        # Several serverless instances can cold-start at once: one migrates/seeds, the others wait.
+        db.execute(text("SELECT pg_advisory_xact_lock(4242001)"))
+    dbmod.create_all()
     try:
         if get_settings().demo_mode and db.scalar(select(User).limit(1)) is None:
             from app.seed import reset_demo
 
             reset_demo(db)
             log.info("Seeded fictional demo data.")
+            return True
         elif get_settings().demo_mode:
             from app.services.availability import ensure_demo_data
             from app.services.names import backfill_demo_names
@@ -47,6 +52,7 @@ def _ensure_seeded() -> None:
                 log.warning("Demo data upgrade: %s", changes)
     finally:
         gen.close()
+    return False
 
 
 @asynccontextmanager
@@ -60,12 +66,15 @@ async def lifespan(_: FastAPI):
             raise RuntimeError("Refusing to start a public deployment:\n- " + "\n- ".join(problems))
     log.info("CuraLink API starting (environment=%s, demo_mode=%s, demo_controls=%s, llm=%s, voice=%s)", s.environment, s.demo_mode, s.demo_controls,
              "configured" if s.anthropic_api_key else "fallback", "configured" if s.cartesia_api_key else "fallback")
-    _ensure_seeded()
+    seeded = _ensure_seeded()
     from app.services import convex_bridge
 
     if convex_bridge.enabled():
         convex_bridge.install()
-        threading.Thread(target=_initial_convex_sync, name="convex-initial-sync", daemon=True).start()
+        if not s.convex_sync_inline:  # long-running server: catch Convex up in the background
+            threading.Thread(target=_initial_convex_sync, name="convex-initial-sync", daemon=True).start()
+        elif seeded:  # serverless: a fresh database was just seeded before the hook existed; mirror it once now
+            _initial_convex_sync()
     yield
 
 
@@ -98,6 +107,7 @@ def create_app() -> FastAPI:
         return await call_next(request)
 
     @app.get("/.well-known/jwks.json", include_in_schema=False)
+    @app.get("/api/v1/convex/jwks.json", include_in_schema=False)  # Vercel reserves /.well-known
     def jwks() -> dict:
         from app.services import convex_bridge
 

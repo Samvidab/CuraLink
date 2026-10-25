@@ -95,3 +95,21 @@ def test_api_docs_are_off_in_production(monkeypatch):
     monkeypatch.setattr(get_settings(), "environment", "production")
     app = create_app()
     assert app.docs_url is None and app.openapi_url is None
+
+
+def test_vercel_cors_uses_the_deployments_own_hosts(monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_PROJECT_PRODUCTION_URL", "curalink.example.app")
+    monkeypatch.setenv("VERCEL_URL", "curalink-abc123.example.app")
+    s = Settings(cors_origins="http://localhost:8443,https://extra.example.com")
+    assert s.cors_origin_list == ["https://curalink.example.app", "https://curalink-abc123.example.app", "https://extra.example.com"]
+
+
+def test_serverless_production_requires_postgres_env_key_and_small_uploads(monkeypatch):
+    monkeypatch.setenv("VERCEL", "1")
+    base = dict(environment="production", cookie_secure=True, demo_controls="token", demo_admin_token="t" * 40, signature_encryption_key="k" * 44,
+                convex_site_url="https://fantastic-x-1.convex.site", convex_sync_secret="s" * 40, convex_jwt_issuer="https://production.curalink-issuer.example")
+    bad = production_problems(Settings(**base, database_url="sqlite:////tmp/x.db", max_upload_mb=12))
+    assert any("Postgres" in p for p in bad) and any("CONVEX_JWT_PRIVATE_KEY" in p for p in bad) and any("MAX_UPLOAD_MB" in p for p in bad)
+    good = Settings(**base, database_url="postgresql://u:p@h/db", max_upload_mb=4, convex_jwt_private_key="-----BEGIN PRIVATE KEY-----")
+    assert production_problems(good) == []

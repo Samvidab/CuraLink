@@ -1,0 +1,19 @@
+# Never upload secrets, local databases or local tooling state to Vercel.
+.env
+.env.*
+!.env.example
+**/.env.local
+**/*.db
+**/*.db-journal
+backend/.secrets
+backend/.venv
+**/__pycache__
+**/node_modules
+frontend/.convex
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+.run
+.git
+*.zip
+deploy

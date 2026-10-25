@@ -23,6 +23,7 @@ class Health(BaseModel):
     integrations: IntegrationStatus
     llm_detail: dict | None = None  # sanitized last Claude failure: category, http_status, error_type, message
     convex: dict | None = None  # sync status (enabled, last success/error time); never URLs or secrets
+    limits: dict | None = None  # e.g. {"photo_mb": 4}
 
 
 class DemoResetOut(BaseModel):

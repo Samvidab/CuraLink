@@ -1,6 +1,8 @@
 """Startup self-check for a public deployment (ENVIRONMENT=production). Reports problems by NAME only;
 secret values are never printed or logged."""
 
+import os
+
 from app.config import Settings
 
 DEFAULT_LOCAL_ORIGINS = ("localhost", "127.0.0.1")
@@ -20,17 +22,25 @@ def production_problems(s: Settings) -> list[str]:
         problems.append("CORS_ORIGINS must list only the public HTTPS origin(s), not localhost.")
     if any(o.startswith("http://") for o in s.cors_origin_list):
         problems.append("CORS_ORIGINS must use https:// origins.")
-    if not s.database_url.startswith("sqlite:////") and s.database_url.startswith("sqlite"):
+    serverless = bool(os.environ.get("VERCEL"))
+    if serverless and not s.database_url.startswith(("postgres://", "postgresql")):
+        problems.append("DATABASE_URL must be a Postgres URL on Vercel (local files don't persist between invocations).")
+    if not serverless and s.database_url.startswith("sqlite") and not s.database_url.startswith("sqlite:////"):
         problems.append("DATABASE_URL must be an absolute path on the persistent volume (sqlite:////data/curalink.db).")
     if s.convex_site_url or s.convex_sync_secret:
         if not (s.convex_site_url or "").startswith("https://") or not (s.convex_site_url or "").endswith(".convex.site"):
             problems.append("CONVEX_SITE_URL must be the deployment's https://<name>.convex.site URL.")
         if len(s.convex_sync_secret or "") < 32:
             problems.append("CONVEX_SYNC_SECRET must be at least 32 random characters (and match CURALINK_SYNC_SECRET in Convex).")
-        if not (s.public_api_url or "").startswith("https://"):
-            problems.append("PUBLIC_API_URL must be this API's https:// origin (Convex token issuer).")
+        if not (s.convex_jwt_issuer or s.public_api_url or "").startswith("https://"):
+            problems.append("CONVEX_JWT_ISSUER (or PUBLIC_API_URL) must be set to the https:// issuer name configured in Convex.")
     if s.origin_secret is not None and len(s.origin_secret) < 32:
         problems.append("ORIGIN_SECRET must be at least 32 random characters.")
-    if not str(s.secrets_dir).startswith("/data"):
+    if serverless:
+        if (s.convex_site_url or s.convex_sync_secret) and not s.convex_jwt_private_key:
+            problems.append("CONVEX_JWT_PRIVATE_KEY must be set on Vercel (no persistent disk for a generated key).")
+        if s.max_upload_mb > 4:
+            problems.append("MAX_UPLOAD_MB must be 4 or less on Vercel (4.5 MB request limit).")
+    elif not str(s.secrets_dir).startswith("/data"):
         problems.append("SECRETS_DIR must be on the persistent volume (/data/secrets).")
     return problems

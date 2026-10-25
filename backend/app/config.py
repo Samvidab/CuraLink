@@ -1,5 +1,7 @@
 """Runtime configuration. All secrets come from the environment and stay server-side."""
 
+import os
+
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
@@ -8,6 +10,7 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = Path(__file__).resolve().parents[1]  # also the bundle root when deployed as a Vercel function
 
 
 class Settings(BaseSettings):
@@ -20,7 +23,7 @@ class Settings(BaseSettings):
     # deliberately unimplemented: demo endpoints refuse to run outside demo.
     demo_mode: bool = True
     database_url: str = f"sqlite:///{REPO_ROOT / 'backend' / 'curalink_demo.db'}"
-    sample_data_dir: Path = REPO_ROOT / "sample_data"
+    sample_data_dir: Path = BACKEND_DIR / "sample_data"  # inside backend/ so serverless bundles include it
     cors_origins: str = "http://localhost:8443,http://127.0.0.1:8443,http://localhost:5173"
 
     # Fixed "today" so the fictional demo week is reproducible.
@@ -60,6 +63,18 @@ class Settings(BaseSettings):
     # short-lived RS256 tokens from GET /api/v1/convex/token. Unset -> sync off (local development unchanged).
     convex_site_url: str | None = None  # https://<deployment>.convex.site
     convex_sync_secret: str | None = None
+    # PEM private key for Convex tokens. Required where the disk isn't persistent (Vercel); otherwise generated
+    # once into SECRETS_DIR. Multi-line values are fine in Vercel's environment settings.
+    convex_jwt_private_key: str | None = None
+    # The token issuer name Convex expects (its CURALINK_JWT_ISSUER). Defaults to PUBLIC_API_URL / local API.
+    convex_jwt_issuer: str | None = None
+    # Serverless platforms may freeze an instance after the response: push to Convex inside the request there.
+    convex_sync_inline: bool = bool(os.environ.get("VERCEL"))
+    # Set ONLY when the voice WebSocket is served from a different host than the page (then a single-use ticket is
+    # used because the session cookie isn't sent cross-site). Same-origin deployments (Vercel Services) leave it empty.
+    voice_ws_base: str | None = None
+    # Largest photo upload. Vercel Functions accept request bodies up to 4.5 MB, so use 4 there.
+    max_upload_mb: float = 12
 
     # Delivery never leaves this allowlist in demo mode.
     test_email_allowlist: str = "example.com"
@@ -135,7 +150,13 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        explicit = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        if os.environ.get("VERCEL"):
+            # On Vercel the page and API share one origin; allow exactly this deployment's own HTTPS hosts
+            # (Vercel system variables), plus any explicitly configured non-local origins.
+            own = [f"https://{h}" for h in (os.environ.get("VERCEL_PROJECT_PRODUCTION_URL"), os.environ.get("VERCEL_URL")) if h]
+            return own + [o for o in explicit if "localhost" not in o and "127.0.0.1" not in o]
+        return explicit
 
     @property
     def allowlisted_domains(self) -> list[str]:
