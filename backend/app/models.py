@@ -122,7 +122,7 @@ class ClinicSlot(Base):
     starts are rejected inside the booking transaction (services/availability.book)."""
 
     __tablename__ = "clinic_slots"
-    __table_args__ = (Index("uq_clinician_active_start", "clinician_id", "starts_at", unique=True, sqlite_where=text("status = 'BOOKED'")),)
+    __table_args__ = (Index("uq_clinician_active_start", "clinician_id", "starts_at", unique=True, sqlite_where=text("status = 'BOOKED'"), postgresql_where=text("status = 'BOOKED'")),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     clinic_id: Mapped[str] = mapped_column(String)

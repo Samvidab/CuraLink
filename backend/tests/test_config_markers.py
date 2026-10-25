@@ -52,5 +52,7 @@ def test_checklist_covers_required_groups_and_fields():
 def test_no_secrets_in_frontend_source():
     for f in (ROOT / "frontend" / "src").rglob("*.ts*"):
         text = f.read_text()
-        assert "ANTHROPIC_API_KEY" not in text and "CARTESIA_API_KEY" not in text and "VITE_" not in text, f
+        assert "ANTHROPIC_API_KEY" not in text and "CARTESIA_API_KEY" not in text, f
+        # VITE_* values are compiled into the public bundle: only the (public) Convex deployment URL is allowed.
+        assert set(re.findall(r"VITE_[A-Z_]+", text)) <= {"VITE_CONVEX_URL"}, f
         assert not re.search(r"sk-ant-[A-Za-z0-9]", text), f

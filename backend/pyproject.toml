@@ -19,6 +19,7 @@ dependencies = [
   "pillow-heif>=0.18",
   "cryptography>=42",
   "anthropic>=1.0",
+  "psycopg[binary]==3.3.6",
 ]
 
 [dependency-groups]

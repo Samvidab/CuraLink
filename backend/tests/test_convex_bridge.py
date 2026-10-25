@@ -115,10 +115,12 @@ def test_demo_reset_resends_everything_with_reset_flag(app, monkeypatch, capture
 def test_voice_ticket_is_single_use_and_bound_to_the_student(app, monkeypatch):
     from app.routers import voice as v
 
-    monkeypatch.setattr(get_settings(), "public_api_url", "https://api.example.com")
     monkeypatch.setattr(v, "cartesia_enabled", lambda: True)
     s = _client(app)
     s.post("/api/v1/auth/demo/login", json={"persona": "student"})
+    # Same-origin deployment (Vercel Services): no ticket, the session cookie authenticates the WebSocket.
+    assert s.post("/api/v1/voice/sessions", json={"voice_consent": True}).json()["stream_url"] is None
+    monkeypatch.setattr(get_settings(), "voice_ws_base", "https://api.example.com")
     url = s.post("/api/v1/voice/sessions", json={"voice_consent": True}).json()["stream_url"]
     assert url.startswith("wss://api.example.com/api/v1/voice/stream?ticket=")
     ticket = url.split("ticket=")[1]

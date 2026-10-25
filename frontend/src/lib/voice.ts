@@ -85,6 +85,7 @@ export class VoiceController {
   private turn = 0
   private active = false
   private history: { role: 'user' | 'assistant'; text: string }[] = []
+  private reconnects = 0
   private greeting = ''
 
   constructor(events: VoiceEvents) { this.ev = events }
@@ -95,6 +96,7 @@ export class VoiceController {
   async start(history: { role: 'user' | 'assistant'; text: string }[], greeting = '') {
     this.history = history.slice(-10)
     this.greeting = greeting
+    this.reconnects = 0
     this.active = true
     this.set('REQUESTING_MIC')
     try {
@@ -173,27 +175,51 @@ export class VoiceController {
     const node = new AudioWorkletNode(this.inCtx, 'pcm-capture')
     this.inCtx.createMediaStreamSource(this.micStream).connect(node)
 
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    // Same host in development; a ticketed wss:// URL to the API host when the page is served elsewhere (Vercel).
-    this.ws = new WebSocket(this.info!.stream_url ?? `${proto}://${location.host}${this.info!.stream_path}`)
-    this.ws.binaryType = 'arraybuffer'
-    this.ws.onopen = () => {
-      this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
-      // New conversation: the server speaks its greeting (built from the signed-in profile) through Cartesia.
-      if (!this.history.some(h => h.role === 'user')) this.ws?.send(JSON.stringify({ type: 'greet' }))
-      for (const chunk of this.preroll) this.ws?.send(chunk)
-      this.preroll = []
-    }
-    this.ws.onmessage = e => this.onServer(JSON.parse(e.data as string))
-    this.ws.onclose = ev => {
-      if (!this.active) return
-      this.fail(ev.code === 4401 ? 'Voice consent is required.' : 'Voice connection closed. Switched to text.')
-    }
+    this.openSocket()
     node.port.onmessage = (e: MessageEvent<{ level?: number; pcm?: ArrayBuffer }>) => {
       if (e.data.level !== undefined) this.vad(e.data.level)
       if (!e.data.pcm || this.state === 'THINKING') return
       if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(e.data.pcm)
       else if (this.ws?.readyState === WebSocket.CONNECTING && this.preroll.length < 30) this.preroll.push(e.data.pcm) // ≤3 s
+    }
+  }
+
+  /** Serverless hosts close long-lived sockets (e.g. at the function's max duration): reconnect with backoff and
+   *  hand the conversation so far back to the server, so the student just keeps talking. */
+  private openSocket() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    // Same host (cookie) normally; a ticketed wss:// URL only when the API runs on another host.
+    const ws = new WebSocket(this.info!.stream_url ?? `${proto}://${location.host}${this.info!.stream_path}`)
+    this.ws = ws
+    ws.binaryType = 'arraybuffer'
+    ws.onopen = () => {
+      const resumed = this.reconnects > 0
+      this.reconnects = 0
+      ws.send(JSON.stringify({ type: 'history', items: this.history }))
+      // New conversation: the server speaks its greeting (built from the signed-in profile) through Cartesia.
+      if (!resumed && !this.history.some(h => h.role === 'user')) ws.send(JSON.stringify({ type: 'greet' }))
+      for (const chunk of this.preroll) ws.send(chunk)
+      this.preroll = []
+      if (resumed) this.set('LISTENING')
+    }
+    ws.onmessage = e => this.onServer(JSON.parse(e.data as string))
+    ws.onclose = ev => {
+      if (!this.active || this.ws !== ws) return
+      if ([4401, 4403, 4404].includes(ev.code) || this.reconnects >= 6) {
+        this.fail(ev.code === 4401 ? 'Voice consent is required.' : 'Voice connection closed. Switched to text.')
+        return
+      }
+      this.reconnects += 1
+      this.stopPlayback()
+      this.set('RECONNECTING')
+      const delay = Math.min(30_000, 1000 * 2 ** (this.reconnects - 1)) + Math.random() * 400
+      setTimeout(async () => {
+        if (!this.active) return
+        if (this.info?.stream_url) { // tickets are single-use: get a fresh one
+          try { this.info = await api.post<VoiceSessionInfo>('/voice/sessions', { voice_consent: true }) } catch { /* retry below */ }
+        }
+        if (this.active) this.openSocket()
+      }, delay)
     }
   }
 
@@ -232,9 +258,9 @@ export class VoiceController {
     switch (m.type) {
       case 'state': if (m.state) this.set(m.state); break
       case 'transcript.partial': this.ev.onPartial(m.text ?? ''); break
-      case 'transcript.final': this.acceptedVersion = m.turn_version; this.ev.onUserFinal(m.text ?? ''); break
+      case 'transcript.final': this.acceptedVersion = m.turn_version; this.history = [...this.history, { role: 'user' as const, text: m.text ?? '' }].slice(-10); this.ev.onUserFinal(m.text ?? ''); break
       case 'assistant.greeting': this.acceptedVersion = m.turn_version; this.ev.onGreeting?.(m.text ?? ''); break
-      case 'assistant.text': if (m.reply && m.turn_version >= this.acceptedVersion) this.ev.onReply(m.reply); break
+      case 'assistant.text': if (m.reply && m.turn_version >= this.acceptedVersion) { this.history = [...this.history, { role: 'assistant' as const, text: m.reply.assistant_message }].slice(-10); this.ev.onReply(m.reply) } break
       case 'assistant.cancelled': this.acceptedVersion = m.turn_version; this.stopPlayback(); this.ev.onCancelled?.(); break
       case 'assistant.audio.chunk': if (m.turn_version >= this.acceptedVersion && m.data) this.play(m.data); break
       case 'audio.error': this.ev.onNotice(m.message ?? 'Voice error.'); break

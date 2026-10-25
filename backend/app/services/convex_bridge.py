@@ -48,8 +48,11 @@ def signing_key() -> rsa.RSAPrivateKey:
     """Generated once and kept in SECRETS_DIR (persistent volume in production, git-ignored locally)."""
     global _key
     if _key is None:
+        pem = get_settings().convex_jwt_private_key
         path = get_settings().secrets_dir / "convex_jwt.pem"
-        if path.exists():
+        if pem:
+            _key = serialization.load_pem_private_key(pem.replace("\\n", "\n").encode(), password=None)  # type: ignore[assignment]
+        elif path.exists():
             _key = serialization.load_pem_private_key(path.read_bytes(), password=None)  # type: ignore[assignment]
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +76,12 @@ def jwks() -> dict:
 
 def issuer() -> str:
     s = get_settings()
-    return (s.public_api_url or "http://127.0.0.1:8000").rstrip("/")
+    return (s.convex_jwt_issuer or s.public_api_url or "http://127.0.0.1:8000").rstrip("/")
+
+
+def jwks_data_uri() -> str:
+    """The PUBLIC key set as a data: URI for Convex's CURALINK_JWKS (contains no secret)."""
+    return "data:text/plain;charset=utf-8;base64," + base64.b64encode(json.dumps(jwks()).encode()).decode()
 
 
 def mint(user: User, now: int | None = None) -> str:
@@ -306,8 +314,19 @@ def _after_flush(session: Session, _ctx) -> None:
 
 def _after_commit(session: Session) -> None:
     keys, gone = session.info.pop("convex_keys", set()), session.info.pop("convex_deleted", set())
-    if keys or gone:
-        _queue.put((set(keys), set(gone)))
+    if not (keys or gone):
+        return
+    if get_settings().convex_sync_inline:
+        # Serverless: no background thread survives the response, so push now (failures are recorded, never raised;
+        # an admin resync repairs any gap).
+        try:
+            STATUS["pushed"] += push_keys(set(keys), set(gone))
+            STATUS["last_ok"] = time.time()
+        except Exception as exc:
+            STATUS["last_error"] = f"{type(exc).__name__} at {time.strftime('%H:%M:%S')}"
+            log.warning("Convex inline sync failed (%s); %d records not pushed", type(exc).__name__, len(keys))
+        return
+    _queue.put((set(keys), set(gone)))
 
 
 def _after_rollback(session: Session) -> None:
@@ -322,6 +341,8 @@ def install() -> None:
         event.listen(Session, "after_flush", _after_flush)
         event.listen(Session, "after_commit", _after_commit)
         event.listen(Session, "after_rollback", _after_rollback)
+    if get_settings().convex_sync_inline:
+        return
     if _worker is None or not _worker.is_alive():
         _worker = threading.Thread(target=_run, name="convex-sync", daemon=True)
         _worker.start()

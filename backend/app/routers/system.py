@@ -28,6 +28,7 @@ def health() -> Health:
         ),
         llm_detail=llm_gateway.detail(),
         convex=_convex_status(),
+        limits={"photo_mb": get_settings().max_upload_mb},
     )
 
 
@@ -74,6 +75,16 @@ def demo_reset(db: Session = Depends(get_db)) -> DemoResetOut:
     if convex_bridge.enabled():
         convex_bridge.full_sync(reset_all=True)  # Convex mirrors the fresh fictional data, nothing stale
     return DemoResetOut(student_id="demo-student-1")
+
+
+@router.post("/demo/convex-resync", dependencies=[Depends(demo_admin)])
+def convex_resync() -> dict:
+    """Admin repair: push every current record to Convex (e.g. after an outage)."""
+    from app.services import convex_bridge
+
+    if not convex_bridge.enabled():
+        raise ApiError(409, "CONVEX_DISABLED", "Convex sync isn't configured.")
+    return {"pushed": convex_bridge.full_sync()}
 
 
 @router.get("/demo/personas", response_model=list[DemoPersona], dependencies=[Depends(_demo_only)])

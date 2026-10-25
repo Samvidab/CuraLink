@@ -56,7 +56,7 @@ async def _store(db: Session, user: User, data: bytes, synthetic: bool) -> dict:
 async def upload(file: UploadFile = File(...), consent: bool = Form(False), user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
     if not consent:
         raise ApiError(400, "PHOTO_CONSENT_REQUIRED", "Confirm photo consent first, or continue without a photo.")
-    data = await file.read(vision.MAX_BYTES + 1)
+    data = await file.read(vision.max_bytes() + 1)
     return await _store(db, user, data, synthetic=False)
 
 

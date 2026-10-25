@@ -1,4 +1,55 @@
-# CuraLink — Public Deployment (Vercel + Convex + Vultr)
+# CuraLink — Public Deployment (Vercel + Neon Postgres + Convex)
+
+**Live demo (fictional data only, not a clinical service):** https://curalink-rose.vercel.app
+
+| Piece | Where | Notes |
+|---|---|---|
+| React/Vite frontend | Vercel service `web` (`frontend/`) | Static build; same domain as the API |
+| FastAPI backend | Vercel service `api` (`backend/`, entrypoint `app.main:app`) | Python Function on Fluid compute, `maxDuration` 300 s, region iad1 |
+| Database | Neon Postgres `curalink-db` (US East), via the Vercel integration | `DATABASE_URL`; schema created and fictional demo data seeded on the first cold start |
+| Real-time synchronized records | Convex production `fantastic-porpoise-318` | Written only by the API (sync secret); browser reads authorized with RS256 tokens; public keys configured inline (`CURALINK_JWKS`) |
+| Voice | Cartesia over a same-origin WebSocket (`/api/v1/voice/stream`) | Session cookie authenticates; the client reconnects with backoff when a function's time limit closes the socket |
+
+`vercel.json` (repo root) routes `/api/*` to FastAPI and everything else to React. FastAPI receives the original `/api/...` paths. `/.well-known` can't be routed on Vercel, so the Convex key endpoint is `/api/v1/convex/jwks.json`.
+
+### Configuration (names only; values never printed)
+
+- **Vercel Production:**
+  - Neon integration: `DATABASE_URL` (plus related `PG*`/`POSTGRES_*` variables).
+  - Set by `deploy/vercel/configure-env.sh core`: `ENVIRONMENT`, `DEMO_MODE`, `COOKIE_SECURE`, `DEMO_CONTROLS`, `DEMO_ADMIN_TOKEN`, `DEMO_INBOX_REDIRECT`, `EMAIL_DELIVERY_MODE`, `TEST_EMAIL_ALLOWLIST`, `MAX_UPLOAD_MB`, `CONVEX_SITE_URL`, `CONVEX_JWT_ISSUER`, `CONVEX_JWT_PRIVATE_KEY`, `CONVEX_SYNC_SECRET`, `SIGNATURE_ENCRYPTION_KEY`, `VITE_CONVEX_URL`.
+  - Set by `configure-env.sh api-keys`: `ANTHROPIC_API_KEY`, `CARTESIA_API_KEY`, both stored as *Secret*.
+- **Convex prod:** `CURALINK_SYNC_SECRET`, `CURALINK_JWT_ISSUER`, `CURALINK_JWKS` (public keys only).
+  - The dev and local deployments have their own, different values.
+- **Not secret:** `VITE_CONVEX_URL` is the only `VITE_*` value (a test enforces this). API keys exist only as server-side variables.
+
+### Deploy / update
+
+```bash
+cd frontend && npx convex deploy -y          # Convex functions + schema -> production (fantastic-porpoise-318)
+cd .. && npx -y vercel@63.1.2 deploy --prod   # builds both services on Vercel (no GitHub push needed)
+PROD_URL=https://curalink-rose.vercel.app npx --prefix frontend playwright test -c frontend/playwright.prod.config.ts
+```
+
+### Limits on Vercel
+
+- **Requests:** at most 4.5 MB, so `MAX_UPLOAD_MB=4`. The browser shrinks oversized JPEG/PNG/WebP photos first; HEIC files over 4 MB get a clear message.
+- **Function time:** up to 300 s on Hobby, so voice sockets reconnect after that.
+- **Memory:** no shared memory between instances. Sessions, conversations and records are in Postgres; Convex sync happens inside each request.
+- **Demo admin actions** (reset, Convex resync, forced failure): these need the `X-CuraLink-Admin` header (token in `~/.curalink-demo-admin-token`). Without it they return 404. FastAPI docs are off in production.
+
+### Rollback
+
+- **Frontend/API:** Vercel dashboard → Deployments → previous → *Promote to Production* (instant).
+- **Convex:** `npx convex deploy` from the previous commit. Synced data can always be rebuilt with `POST /api/v1/demo/convex-resync` (admin token).
+- **Database:** Neon's point-in-time restore from the Neon console.
+
+The Vultr kit in `deploy/vultr/` is kept as a fallback for running the same API in a container.
+
+---
+
+# Earlier plans (kept for reference)
+
+## Vercel + Convex + Vultr plan (superseded)
 
 Status: **prepared, not yet deployed.** URLs are added here only after the deployed app has been tested.
 

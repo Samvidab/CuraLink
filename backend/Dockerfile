@@ -6,7 +6,6 @@ WORKDIR /app/backend
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY backend/ ./
-COPY sample_data/ /app/sample_data/
 RUN useradd --create-home --uid 10001 curalink && mkdir -p /data/secrets && chown -R curalink /data
 USER curalink
 ENV ENVIRONMENT=production \

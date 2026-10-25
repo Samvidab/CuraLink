@@ -81,8 +81,8 @@ def create_voice_session(body: VoiceSessionIn, user: User = Depends(require_stud
         session_id=sess.id,
         mode="cartesia" if live else "browser",
         stream_path="/api/v1/voice/stream" if live else None,
-        stream_url=(f"{s.public_api_url.rstrip('/').replace('https://', 'wss://', 1).replace('http://', 'ws://', 1)}/api/v1/voice/stream?ticket={issue_ticket(user.id)}"
-                    if live and s.public_api_url else None),
+        stream_url=(f"{s.voice_ws_base.rstrip('/').replace('https://', 'wss://', 1).replace('http://', 'ws://', 1)}/api/v1/voice/stream?ticket={issue_ticket(user.id)}"
+                    if live and s.voice_ws_base else None),
         input={"encoding": "pcm_s16le", "sample_rate": s.voice_input_sample_rate, "chunk_ms": 100},
         output={"encoding": "pcm_s16le", "sample_rate": s.voice_output_sample_rate},
         note="Cartesia streaming voice." if live else "Cartesia isn't configured on this server; using your browser's speech features where available. Audio stays on your device.",

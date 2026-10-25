@@ -140,11 +140,11 @@ Acceptance tests from the Implementation Plan covered in code: AT-01–AT-14, AT
 
 ## Deployment
 
-Not deployed. The plan, including what Convex would and wouldn't provide, the single-container option, exact commands and the release gate, is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Publish only with the team's approval.
+Public demo (fictional data only): **https://curalink-rose.vercel.app**. It runs React and FastAPI as two Vercel services with Neon Postgres as the database and Convex for real-time synchronized records. Deploy commands, configuration names, limits and rollback steps are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Known limitations
 
-- SQLite single-process demo; not for real patient data. No HIPAA compliance or legally valid e-signature is claimed.
+- SQLite locally, Neon Postgres in the public demo; not for real patient data. No HIPAA compliance or legally valid e-signature is claimed.
 - Real Claude / Cartesia calls are exercised only when keys are configured; automated tests stub them. Cartesia endpoints were verified against docs.cartesia.ai on 2026-10-24 and are configurable in `.env`.
 - The safety screen is keyword-based and deliberately over-triggers; clinician-reviewed criteria are required before any real use.
 - Notability import is not implemented; nothing here assumes access to Notability accounts.

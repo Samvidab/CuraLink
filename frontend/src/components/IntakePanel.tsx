@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, Card } from './ui'
 import { api, ApiError } from '../lib/api'
 import { fmtDay, fmtTime } from '../lib/format'
-import type { Handoff, IntakeSnapshot, PhotoAttachment, Provenance, StudentEncounter } from '../lib/types'
+import type { Handoff, Health, IntakeSnapshot, PhotoAttachment, Provenance, StudentEncounter } from '../lib/types'
 
 type SummaryItem = { key: string; label: string; display: string; source: string; confirmed: boolean }
 type IntakeSummary = { student_reported: Record<string, SummaryItem[]>; ai_generated: SummaryItem[]; missing: { key: string; label: string }[]; uncertain: { key: string; label: string }[]; disclaimer: string }
@@ -19,18 +19,36 @@ export function usePhotos() {
 }
 
 /** Optional, consent-gated photo observations (PRD §11). Never a diagnosis; never sent to professors. */
+/** Shrink a too-large JPEG/PNG/WebP in the browser (HEIC can't be re-encoded by browsers). */
+async function fitForUpload(file: File, maxBytes: number): Promise<File> {
+  if (file.size <= maxBytes || !/^image\/(jpeg|png|webp)$/.test(file.type)) return file
+  const bitmap = await createImageBitmap(file)
+  for (const side of [2400, 1800, 1400]) {
+    const scale = Math.min(1, side / Math.max(bitmap.width, bitmap.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale)
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    const blob: Blob | null = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85))
+    if (blob && blob.size <= maxBytes) return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' })
+  }
+  return file
+}
+
 export function PhotoSection() {
   const qc = useQueryClient()
   const photos = usePhotos()
+  const health = useQuery({ queryKey: ['health'], queryFn: () => api.get<Health>('/health'), staleTime: 60_000 })
+  const limitMb = health.data?.limits?.photo_mb ?? 12
   const [consent, setConsent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const done = () => { qc.invalidateQueries({ queryKey: ['photos'] }); qc.invalidateQueries({ queryKey: ['intake'] }) }
   const [dragging, setDragging] = useState(false)
-  const upload = async (file?: File) => {
-    if (!file) return
+  const upload = async (picked?: File) => {
+    if (!picked) return
     if (!consent) { setError('Tick the photo consent box first.'); return }
-    if (file.size > 12 * 1024 * 1024) { setError(`That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is 12 MB.`); return }
+    const file = await fitForUpload(picked, limitMb * 1024 * 1024)
+    if (file.size > limitMb * 1024 * 1024) { setError(`That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is ${limitMb} MB.${/heic|heif/i.test(file.type + file.name) ? ' iPhone tip: Settings → Camera → Formats → Most Compatible saves smaller JPEG photos.' : ''}`); return }
     setBusy(true); setError('')
     const form = new FormData(); form.append('file', file); form.append('consent', String(consent))
     try { await api.post('/vision/observations', form); done() } catch (e) { setError(e instanceof ApiError ? e.message : 'Upload failed.') } finally { setBusy(false) }
@@ -50,7 +68,7 @@ export function PhotoSection() {
         <label className={`inline-flex min-h-10 cursor-pointer items-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold focus-within:ring-4 focus-within:ring-teal-200 sm:hidden ${!consent||busy?'pointer-events-none opacity-50':''}`}>Take a photo<input type="file" accept="image/*" capture="environment" className="sr-only" disabled={!consent||busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value=''}} aria-label="Take a photo with your camera"/></label>
         <Button variant="ghost" className="min-h-10 text-xs" disabled={!consent||busy} onClick={()=>demo('red_area')}>Use synthetic demo image</Button>
       </div>
-      <p id="photo-formats" className="mt-2 text-xs text-slate-600">Upload a photo (JPG, PNG, WebP, or iPhone HEIC/HEIF) · up to 12 MB{dragging?'':' · or drag it here'}</p>
+      <p id="photo-formats" className="mt-2 text-xs text-slate-600">Upload a photo (JPG, PNG, WebP, or iPhone HEIC/HEIF) · up to {limitMb} MB{dragging?'':' · or drag it here'}</p>
     </div>
     {busy&&<p className="mt-2 text-xs text-slate-500" role="status">Checking image quality and describing visible features…</p>}
     {error&&<p role="alert" className="mt-2 text-xs text-rose-600">{error} You can continue without a photo.</p>}

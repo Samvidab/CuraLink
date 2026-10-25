@@ -40,3 +40,4 @@ backend/.secrets/
 # Convex local deployment data
 frontend/.convex/
 .convex/
+.vercel

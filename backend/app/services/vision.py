@@ -19,10 +19,19 @@ from PIL import Image, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 from app.errors import ApiError
 from app.services import safety
 
-MAX_BYTES = 12 * 1024 * 1024  # iPhone HEIC/JPEG photos are typically 2-6 MB
 MAX_SIDE = 1600
 MAX_PIXELS = 50_000_000  # decoded-size guard (decompression bombs)
-SUPPORTED_LABEL = "JPG, PNG, WebP or iPhone HEIC/HEIF, up to 12 MB"
+
+
+def max_bytes() -> int:
+    """MAX_UPLOAD_MB (12 by default; 4 on Vercel, whose functions accept request bodies up to 4.5 MB)."""
+    from app.config import get_settings
+
+    return int(get_settings().max_upload_mb * 1024 * 1024)
+
+
+def supported_label() -> str:
+    return f"JPG, PNG, WebP or iPhone HEIC/HEIF, up to {max_bytes() // (1024 * 1024)} MB"
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 pillow_heif.register_heif_opener()  # decode HEIC/HEIF in-process (no temp files, no shelling out)
 _HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif"}
@@ -70,13 +79,13 @@ def sniff(data: bytes) -> str:
         return "image/webp"
     if data[4:8] == b"ftyp" and data[8:12] in _HEIF_BRANDS:
         return "image/heic"
-    raise ApiError(422, "UNSUPPORTED_IMAGE", f"That file isn't a supported photo. Use {SUPPORTED_LABEL}.")
+    raise ApiError(422, "UNSUPPORTED_IMAGE", f"That file isn't a supported photo. Use {supported_label()}.")
 
 
 def clean(data: bytes) -> Image.Image:
     """Validate and re-encode. Re-encoding from raw pixels discards EXIF/GPS and any other metadata."""
-    if len(data) > MAX_BYTES:
-        raise ApiError(422, "IMAGE_TOO_LARGE", f"That photo is too large. Use {SUPPORTED_LABEL}.")
+    if len(data) > max_bytes():
+        raise ApiError(422, "IMAGE_TOO_LARGE", f"That photo is too large. Use {supported_label()}.")
     if not data:
         raise ApiError(422, "CORRUPT_IMAGE", "The file was empty. Try another photo or continue without one.")
     mime = sniff(data)

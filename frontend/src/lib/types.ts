@@ -11,6 +11,7 @@ export interface Health {
   integrations: { clinic_inventory: 'demo'; email_delivery: 'test_only'; llm: 'live' | 'fallback' | 'error'; voice: 'live' | 'fallback' }
   llm_detail?: LlmError | null
   convex?: { enabled: boolean; last_ok?: number | null; last_error?: string | null; records_pushed?: number }
+  limits?: { photo_mb: number }
 }
 
 export interface Me {
