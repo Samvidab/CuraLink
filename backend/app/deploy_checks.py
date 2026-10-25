@@ -22,4 +22,15 @@ def production_problems(s: Settings) -> list[str]:
         problems.append("CORS_ORIGINS must use https:// origins.")
     if not s.database_url.startswith("sqlite:////") and s.database_url.startswith("sqlite"):
         problems.append("DATABASE_URL must be an absolute path on the persistent volume (sqlite:////data/curalink.db).")
+    if s.convex_site_url or s.convex_sync_secret:
+        if not (s.convex_site_url or "").startswith("https://") or not (s.convex_site_url or "").endswith(".convex.site"):
+            problems.append("CONVEX_SITE_URL must be the deployment's https://<name>.convex.site URL.")
+        if len(s.convex_sync_secret or "") < 32:
+            problems.append("CONVEX_SYNC_SECRET must be at least 32 random characters (and match CURALINK_SYNC_SECRET in Convex).")
+        if not (s.public_api_url or "").startswith("https://"):
+            problems.append("PUBLIC_API_URL must be this API's https:// origin (Convex token issuer).")
+    if s.origin_secret is not None and len(s.origin_secret) < 32:
+        problems.append("ORIGIN_SECRET must be at least 32 random characters.")
+    if not str(s.secrets_dir).startswith("/data"):
+        problems.append("SECRETS_DIR must be on the persistent volume (/data/secrets).")
     return problems

@@ -1,6 +1,9 @@
 """CuraLink API entrypoint. Run: `uv run uvicorn app.main:app --reload --port 8000`."""
 
+import hmac
 import logging
+import threading
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -18,6 +21,7 @@ from app.security import CLIENT_HEADER
 
 log = logging.getLogger("curalink")
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+ORIGIN_EXEMPT = {"/api/v1/health", "/api/v1/voice/stream"}  # health checks; WebSocket uses a single-use ticket
 
 
 def _ensure_seeded() -> None:
@@ -57,13 +61,47 @@ async def lifespan(_: FastAPI):
     log.info("CuraLink API starting (environment=%s, demo_mode=%s, demo_controls=%s, llm=%s, voice=%s)", s.environment, s.demo_mode, s.demo_controls,
              "configured" if s.anthropic_api_key else "fallback", "configured" if s.cartesia_api_key else "fallback")
     _ensure_seeded()
+    from app.services import convex_bridge
+
+    if convex_bridge.enabled():
+        convex_bridge.install()
+        threading.Thread(target=_initial_convex_sync, name="convex-initial-sync", daemon=True).start()
     yield
+
+
+def _initial_convex_sync() -> None:
+    from app.services import convex_bridge
+
+    try:
+        n = convex_bridge.full_sync()
+        convex_bridge.STATUS["last_ok"] = time.time()
+        log.info("Convex initial sync: %d records", n)
+    except Exception as exc:
+        convex_bridge.STATUS["last_error"] = type(exc).__name__
+        log.warning("Convex initial sync failed (%s); the outbox will keep retrying changes", type(exc).__name__)
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="CuraLink API", version="0.1.0", lifespan=lifespan)
+    prod = settings.environment == "production"
+    app = FastAPI(title="CuraLink API", version="0.1.0", lifespan=lifespan,
+                  docs_url=None if prod else "/docs", redoc_url=None if prod else "/redoc", openapi_url=None if prod else "/openapi.json")
     install_errors(app)
+
+    @app.middleware("http")
+    async def require_origin_secret(request: Request, call_next):
+        # Behind Vercel: every proxied /api request carries x-origin-secret; direct requests to the API host are refused.
+        secret = get_settings().origin_secret
+        path = request.url.path
+        if secret and path.startswith("/api/") and path not in ORIGIN_EXEMPT and not hmac.compare_digest(request.headers.get("x-origin-secret", ""), secret):
+            return JSONResponse({"code": "FORBIDDEN", "message": "Request rejected.", "recoverable": False, "details": {}}, status_code=403)
+        return await call_next(request)
+
+    @app.get("/.well-known/jwks.json", include_in_schema=False)
+    def jwks() -> dict:
+        from app.services import convex_bridge
+
+        return convex_bridge.jwks()
 
     @app.middleware("http")
     async def require_client_header(request: Request, call_next):

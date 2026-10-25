@@ -1,0 +1,30 @@
+# CuraLink API on Vultr: Caddy (HTTPS, WebSockets) in front of FastAPI. Only Caddy publishes ports (80/443);
+# the API listens on the internal Docker network only, so port 8000 is never reachable from the internet.
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    env_file: /opt/curalink/curalink.env   # chmod 600, root-owned; never committed
+    volumes:
+      - /opt/curalink/data:/data            # SQLite database, signing keys, backups
+    restart: unless-stopped
+    expose: ["8000"]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+
+  caddy:
+    image: caddy:2.8.4
+    depends_on: [api]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      API_HOST: ${API_HOST:?set API_HOST in deploy/vultr/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+
+volumes:
+  caddy_data:
+  caddy_config:

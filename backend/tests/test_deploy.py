@@ -34,7 +34,7 @@ def test_production_self_check_names_problems_without_values():
     problems = production_problems(bad)
     assert len(problems) >= 5 and not any("sk-ant" in p for p in problems)
     good = Settings(environment="production", cookie_secure=True, demo_controls="token", demo_admin_token="x" * 40, cors_origins="https://curalink.example.app",
-                    signature_encryption_key="k" * 44, database_url="sqlite:////data/curalink.db")
+                    signature_encryption_key="k" * 44, database_url="sqlite:////data/curalink.db", secrets_dir="/data/secrets")
     assert production_problems(good) == []
 
 
@@ -66,3 +66,32 @@ def test_test_inbox_only_shows_the_viewers_own_cases(app, student, login):
     assert jordan.get("/api/v1/demo/test-inbox").json() == []
     hale, _ = login("dr.hale@clinic.example.com")
     assert hale.get("/api/v1/demo/test-inbox").json() == []
+
+
+def test_convex_settings_are_validated_in_production():
+    base = dict(environment="production", cookie_secure=True, demo_controls="off", cors_origins="https://curalink.vercel.app",
+                signature_encryption_key="k" * 44, database_url="sqlite:////data/curalink.db", secrets_dir="/data/secrets")
+    bad = production_problems(Settings(**base, convex_site_url="http://x.convex.cloud", convex_sync_secret="short", origin_secret="tiny"))
+    assert any("CONVEX_SITE_URL" in p for p in bad) and any("CONVEX_SYNC_SECRET" in p for p in bad) and any("PUBLIC_API_URL" in p for p in bad)
+    assert any("ORIGIN_SECRET" in p for p in bad) and not any("short" in p or "tiny" in p for p in bad)
+    good = Settings(**base, convex_site_url="https://happy-animal-123.convex.site", convex_sync_secret="s" * 40, public_api_url="https://api.example.com", origin_secret="o" * 40)
+    assert production_problems(good) == []
+
+
+def test_origin_secret_blocks_requests_that_bypass_the_proxy(app, monkeypatch):
+    monkeypatch.setattr(get_settings(), "origin_secret", "o" * 40)
+    c = _client(app)
+    assert c.get("/api/v1/health").status_code == 200  # health stays reachable for monitoring
+    assert c.post("/api/v1/auth/demo/login", json={"persona": "student"}).status_code == 403
+    assert c.post("/api/v1/auth/demo/login", json={"persona": "student"}, headers={"x-origin-secret": "wrong"}).status_code == 403
+    assert c.post("/api/v1/auth/demo/login", json={"persona": "student"}, headers={"x-origin-secret": "o" * 40}).status_code == 200
+
+
+def test_api_docs_are_off_in_production(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    monkeypatch.setattr(get_settings(), "environment", "production")
+    app = create_app()
+    assert app.docs_url is None and app.openapi_url is None

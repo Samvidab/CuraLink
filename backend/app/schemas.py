@@ -22,6 +22,7 @@ class Health(BaseModel):
     demo_today: str
     integrations: IntegrationStatus
     llm_detail: dict | None = None  # sanitized last Claude failure: category, http_status, error_type, message
+    convex: dict | None = None  # sync status (enabled, last success/error time); never URLs or secrets
 
 
 class DemoResetOut(BaseModel):
@@ -368,6 +369,7 @@ class VoiceSessionOut(BaseModel):
     session_id: str
     mode: Literal["cartesia", "browser"]
     stream_path: str | None
+    stream_url: str | None = None  # absolute wss:// URL with a single-use ticket when the API is on another host
     input: dict
     output: dict
     note: str

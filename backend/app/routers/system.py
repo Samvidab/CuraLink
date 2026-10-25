@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.errors import ApiError
 from app.models import User
+from app.security import current_user
 from app.schemas import DemoPersona, DemoResetOut, Health, IntegrationStatus
 from app.seed import DEMO_PASSWORD, reset_demo
 from app.services import llm_gateway
@@ -26,7 +27,25 @@ def health() -> Health:
             voice="live" if s.cartesia_api_key else "fallback",
         ),
         llm_detail=llm_gateway.detail(),
+        convex=_convex_status(),
     )
+
+
+def _convex_status() -> dict:
+    from app.services import convex_bridge
+
+    if not convex_bridge.enabled():
+        return {"enabled": False}
+    st = convex_bridge.STATUS
+    return {"enabled": True, "last_ok": st["last_ok"], "last_error": st["last_error"], "records_pushed": st["pushed"]}
+
+
+@router.get("/convex/token")
+def convex_token(user: User = Depends(current_user)) -> dict:
+    """Short-lived token so the browser can read ITS authorized records from Convex (real-time views)."""
+    from app.services import convex_bridge
+
+    return {"token": convex_bridge.mint(user), "expires_in": convex_bridge.TOKEN_TTL}
 
 
 def _demo_only() -> None:
@@ -50,6 +69,10 @@ def demo_admin(request: Request) -> None:
 @router.post("/demo/reset", response_model=DemoResetOut, dependencies=[Depends(demo_admin)])
 def demo_reset(db: Session = Depends(get_db)) -> DemoResetOut:
     reset_demo(db)
+    from app.services import convex_bridge
+
+    if convex_bridge.enabled():
+        convex_bridge.full_sync(reset_all=True)  # Convex mirrors the fresh fictional data, nothing stale
     return DemoResetOut(student_id="demo-student-1")
 
 

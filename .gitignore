@@ -36,3 +36,7 @@ frontend/playwright-report/
 
 # Locally generated demo signature key (never commit)
 backend/.secrets/
+
+# Convex local deployment data
+frontend/.convex/
+.convex/
