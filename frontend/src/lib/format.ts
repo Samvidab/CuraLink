@@ -80,3 +80,10 @@ const EVENT_LABELS: Record<string, string> = {
   LLM_OUTPUT_GUARDED: 'Assistant reply replaced by safety guard',
 }
 export const eventLabel = (type: string) => EVENT_LABELS[type] ?? type.toLowerCase().replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase())
+
+/** Minutes since local midnight of an instant in the given zone (DST-safe). */
+export const minutesIn = (iso: string, tz = DEFAULT_TZ) => {
+  const parts = fmt({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz }).formatToParts(new Date(iso))
+  const get = (t: string) => Number(parts.find(p => p.type === t)!.value)
+  return get('hour') * 60 + get('minute')
+}

@@ -8,6 +8,7 @@ from app.errors import ApiError
 from app.models import User
 from app.schemas import DemoPersona, DemoResetOut, Health, IntegrationStatus
 from app.seed import DEMO_PASSWORD, reset_demo
+from app.services import llm_gateway
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
@@ -19,9 +20,10 @@ def health() -> Health:
         demo_mode=s.demo_mode,
         demo_today=s.demo_today.isoformat(),
         integrations=IntegrationStatus(
-            llm="live" if s.anthropic_api_key else "fallback",
+            llm=llm_gateway.status(),
             voice="live" if s.cartesia_api_key else "fallback",
         ),
+        llm_detail=llm_gateway.detail(),
     )
 
 

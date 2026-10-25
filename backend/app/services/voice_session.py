@@ -39,6 +39,7 @@ class VoiceSession:
         self._partials: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._turn_started: float | None = None
+        self._last_final: tuple[str, float] | None = None
 
     def set_history(self, items: list[dict]) -> None:
         """Carry over the text conversation so switching text -> voice keeps context."""
@@ -56,6 +57,20 @@ class VoiceSession:
         await self.emit("session.started")
         await self._set("LISTENING")
 
+    async def greet(self, text: str) -> None:
+        """Speak the opening greeting (same text the transcript shows) when a conversation starts in voice.
+        Skipped once the student has said anything, so it never interrupts or repeats."""
+        if any(h["role"] == "user" for h in self.history) or self.state not in ("LISTENING", "IDLE"):
+            return
+        async with self._lock:
+            self.turn_version += 1
+            self.turn_id = f"turn_{uuid4().hex[:8]}"
+            if not self.history:
+                self.history = [{"role": "assistant", "text": text}]
+            await self.emit("assistant.greeting", text=text)
+            self._context = f"ctx_{uuid4().hex[:10]}"
+            self._speaking = asyncio.create_task(self._speak(text, self._context, self.turn_version))
+
     async def _forward_partials(self) -> None:
         async for text in self.stt.partials():
             if text:
@@ -69,6 +84,9 @@ class VoiceSession:
         """New user speech while the assistant is talking (or thinking)."""
         if self.state not in ("SPEAKING", "THINKING"):
             return
+        if self.state == "SPEAKING" and self.history and self.history[-1]["role"] == "assistant":
+            # Don't treat a cut-off reply as fully delivered in later context.
+            self.history[-1] = {"role": "assistant", "text": self.history[-1]["text"] + " [interrupted by the student before finishing]"}
         self.turn_version += 1
         if self._context:
             await self.tts.cancel(self._context)
@@ -86,6 +104,11 @@ class VoiceSession:
         await self.user_turn(text)
 
     async def user_turn(self, text: str) -> None:
+        now = time.perf_counter()
+        norm = " ".join(text.lower().split())
+        if self._last_final and self._last_final[0] == norm and now - self._last_final[1] < 3.0:
+            return  # duplicate speech-recognition final for the same utterance
+        self._last_final = (norm, now)
         async with self._lock:
             if self._turn_started is None:
                 self._turn_started = time.perf_counter()

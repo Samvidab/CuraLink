@@ -13,13 +13,19 @@ Neither ever diagnoses, judges severity/urgency, or confirms blood or bruising.
 import io
 from dataclasses import dataclass, field
 
-from PIL import Image, ImageFilter, ImageStat, UnidentifiedImageError
+import pillow_heif
+from PIL import Image, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
 from app.errors import ApiError
 from app.services import safety
 
-MAX_BYTES = 8 * 1024 * 1024
+MAX_BYTES = 12 * 1024 * 1024  # iPhone HEIC/JPEG photos are typically 2-6 MB
 MAX_SIDE = 1600
+MAX_PIXELS = 50_000_000  # decoded-size guard (decompression bombs)
+SUPPORTED_LABEL = "JPG, PNG, WebP or iPhone HEIC/HEIF, up to 12 MB"
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+pillow_heif.register_heif_opener()  # decode HEIC/HEIF in-process (no temp files, no shelling out)
+_HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif"}
 CATEGORIES = ("apparent_swelling", "red_area_possible_blood", "dry_or_flaky_skin", "discoloration_possible_bruise", "other")
 LABELS = {
     "apparent_swelling": "Apparent puffiness or asymmetry",
@@ -56,26 +62,38 @@ class Result:
 
 
 def sniff(data: bytes) -> str:
+    """Detect the real type from the file's bytes (never trusts the filename or browser MIME)."""
     for sig, mime in _SIGNATURES.items():
         if data.startswith(sig):
             return mime
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    raise ApiError(422, "UNSUPPORTED_IMAGE", "Use a JPEG, PNG or WebP photo.")
+    if data[4:8] == b"ftyp" and data[8:12] in _HEIF_BRANDS:
+        return "image/heic"
+    raise ApiError(422, "UNSUPPORTED_IMAGE", f"That file isn't a supported photo. Use {SUPPORTED_LABEL}.")
 
 
 def clean(data: bytes) -> Image.Image:
     """Validate and re-encode. Re-encoding from raw pixels discards EXIF/GPS and any other metadata."""
     if len(data) > MAX_BYTES:
-        raise ApiError(422, "IMAGE_TOO_LARGE", "Photos must be 8 MB or smaller.")
-    sniff(data)
+        raise ApiError(422, "IMAGE_TOO_LARGE", f"That photo is too large. Use {SUPPORTED_LABEL}.")
+    if not data:
+        raise ApiError(422, "CORRUPT_IMAGE", "The file was empty. Try another photo or continue without one.")
+    mime = sniff(data)
     try:
         img = Image.open(io.BytesIO(data))
-        img.verify()
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
-        raise ApiError(422, "CORRUPT_IMAGE", "We couldn't read that image. Try another photo or continue without one.") from exc
-    img.thumbnail((MAX_SIDE, MAX_SIDE))
+        if img.width * img.height > MAX_PIXELS or min(img.size) < 16:
+            raise ApiError(422, "IMAGE_DIMENSIONS", "That image's dimensions aren't supported. Try a normal phone photo.")
+        if mime != "image/heic":
+            img.verify()
+            img = Image.open(io.BytesIO(data))
+        img = ImageOps.exif_transpose(img)  # honour the camera's orientation before metadata is dropped
+        img = img.convert("RGB")
+    except ApiError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise ApiError(422, "CORRUPT_IMAGE", "We couldn't read that image (it may be damaged). Try another photo or continue without one.") from exc
+    img.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
     return Image.frombytes("RGB", img.size, img.tobytes())  # brand-new image: no metadata carried over
 
 

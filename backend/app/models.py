@@ -6,7 +6,7 @@ normalises aware values on write and returns aware UTC values on read.
 
 from datetime import UTC, date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy.types import DateTime as _DateTime, TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,11 @@ class User(Base):
     clinician_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     credentials: Mapped[str | None] = mapped_column(String, nullable=True)
     demo: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Profile names (app/services/names.py). display_name stays the formal name shown to clinicians/students.
+    first_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    preferred_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    clinical_role: Mapped[str | None] = mapped_column(String, nullable=True)  # self-described at sign-up; not a verification
 
 
 class AuthSession(Base):
@@ -67,7 +72,7 @@ class Course(Base):
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     code: Mapped[str] = mapped_column(String)
     section: Mapped[str | None] = mapped_column(String, nullable=True)
-    term: Mapped[str | None] = mapped_column(String, nullable=True)
+    term: Mapped[str | None] = mapped_column(String, nullable=True)  # e.g. "Fall 2026" (inferred from meeting dates)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     instructor_name: Mapped[str | None] = mapped_column(String, nullable=True)
     instructor_email: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -88,6 +93,7 @@ class Calendar(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     events_imported: Mapped[int] = mapped_column(Integer, default=0)
     warnings: Mapped[list] = mapped_column(JSON, default=list)
+    selected_term: Mapped[str | None] = mapped_column(String, nullable=True)  # student's chosen semester view
 
 
 class CalendarEvent(Base):
@@ -107,10 +113,16 @@ class CalendarEvent(Base):
     all_day: Mapped[bool] = mapped_column(Boolean, default=False)
     kind: Mapped[str] = mapped_column(String, default="class")  # class | personal_block
     source: Mapped[str] = mapped_column(String)  # demo | uploaded | manual
+    term: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class ClinicSlot(Base):
+    """A BOOKED clinician interval (created at confirmation). Candidate times are generated from availability rules.
+    The partial unique index blocks two active bookings for one clinician at the same start; overlapping
+    starts are rejected inside the booking transaction (services/availability.book)."""
+
     __tablename__ = "clinic_slots"
+    __table_args__ = (Index("uq_clinician_active_start", "clinician_id", "starts_at", unique=True, sqlite_where=text("status = 'BOOKED'")),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     clinic_id: Mapped[str] = mapped_column(String)
@@ -133,10 +145,17 @@ class Appointment(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     slot_id: Mapped[str] = mapped_column(ForeignKey("clinic_slots.id"))
+    clinician_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)  # the clinician the student chose
+    appointment_type: Mapped[str | None] = mapped_column(String, nullable=True)
     state: Mapped[str] = mapped_column(String)  # DEMO_CONFIRMED | CANCELLED
     confirmation_mode: Mapped[str] = mapped_column(String, default="demo")
     idempotency_key: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Booking context. purpose = the student's own stated reason (never inferred symptoms); an absence request
+    # is only a request, never an approval. The case (Encounter) links appointment, clinician and summaries.
+    intake_session_id: Mapped[str | None] = mapped_column(ForeignKey("intake_sessions.id"), nullable=True)
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    absence_requested: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class Encounter(Base):
@@ -181,14 +200,21 @@ class IntakeSession(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     student_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    status: Mapped[str] = mapped_column(String, default="OPEN")  # OPEN | SHARED | WITHDRAWN | CLOSED
+    status: Mapped[str] = mapped_column(String, default="OPEN")  # OPEN | CLOSED (legacy rows may say SHARED)
     safety_state: Mapped[str] = mapped_column(String, default="GENERAL_SUPPORT")
     voice_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     transcription_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     photo_consent: Mapped[bool] = mapped_column(Boolean, default=False)
     skipped_fields: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Dialog state (services/dialog.py) plus the on-screen message list for this conversation, so reopening shows
+    # what was actually said instead of silently continuing. Never shared with clinicians; no audio is stored.
+    conversation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)  # conversation start (UTC)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    chief_concern: Mapped[str | None] = mapped_column(Text, nullable=True)  # the student's first description, verbatim
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)  # student's stated reason for an appointment, verbatim
+    absence_requested: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # student asked about absence documentation
 
 
 class IntakeField(Base):
@@ -206,16 +232,23 @@ class IntakeField(Base):
 
 
 class HandoffPacket(Base):
-    """Immutable snapshot the student authorized for their assigned clinician."""
+    """AI-assisted pre-visit summary: an immutable, versioned snapshot of ONE conversation session that the
+    student reviewed and authorized. Versions are per session (v1, v2 … after corrections); older versions are
+    kept as SUPERSEDED, never edited. encounter_id is empty until the student has an appointment: approving
+    before booking is allowed, and booking attaches it. The clinician's access follows the encounter's
+    assigned clinician, so a legitimate reassignment moves access with it (audited)."""
 
     __tablename__ = "handoff_packets"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    encounter_id: Mapped[str] = mapped_column(ForeignKey("encounters.id", ondelete="CASCADE"))
+    encounter_id: Mapped[str | None] = mapped_column(ForeignKey("encounters.id", ondelete="CASCADE"), nullable=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("intake_sessions.id"))
+    student_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     field_snapshot: Mapped[list] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String, default="SHARED")  # SHARED | WITHDRAWN
+    summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # structured pre-visit summary (services/previsit.py)
+    consent_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # exactly what the student agreed to
+    status: Mapped[str] = mapped_column(String, default="SHARED")  # SHARED | SUPERSEDED | WITHDRAWN
     student_approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     clinician_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -401,3 +434,52 @@ class ClinicalEvaluation(Base):
     clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     values: Mapped[dict] = mapped_column(JSON, default=dict)  # keys from curalink_config.EXAMINATION_FIELDS
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ClinicianProfile(Base):
+    # CURALINK_CONFIG: CLINICIAN_PROFILE_DATA
+    # Loaded from sample_data/demo_users.json ("profile" on each clinician) by app/seed.py. Specialty, clinic,
+    # supported appointment types and optional SELF-REPORTED attributes (never inferred from names/photos).
+    __tablename__ = "clinician_profiles"
+
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    specialty: Mapped[str] = mapped_column(String)
+    clinic_id: Mapped[str] = mapped_column(String)
+    clinic_name: Mapped[str] = mapped_column(String)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    travel_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    timezone: Mapped[str] = mapped_column(String, default="America/Indiana/Indianapolis")
+    appointment_types: Mapped[list] = mapped_column(JSON, default=list)
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict)  # {"gender": {"value": ..., "source": ...}}
+    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    photo_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    accepting: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AvailabilityRule(Base):
+    """Weekly recurring working hours (local to the clinician's timezone)."""
+
+    __tablename__ = "availability_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    weekday: Mapped[int] = mapped_column(Integer)  # 0 = Monday
+    start_time: Mapped[str] = mapped_column(String)  # "HH:MM"
+    end_time: Mapped[str] = mapped_column(String)
+    effective_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+
+class AvailabilityException(Base):
+    """Date-specific change: 'unavailable' (whole day if no times; vacations via end_date) or 'extra' hours."""
+
+    __tablename__ = "availability_exceptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    clinician_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String)  # unavailable | extra
+    start_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    end_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)

@@ -9,6 +9,7 @@ speech APIs where available and POSTs transcripts to /intake/messages.
 
 import json
 import logging
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
@@ -21,7 +22,7 @@ from app.models import User
 from app.routers.intake import tool_handler_for
 from app.schemas import IntakeReplyOut, VoiceSessionIn, VoiceSessionOut
 from app.security import require_student, user_for_token
-from app.services import audit, intake_service
+from app.services import audit, intake_service, names
 from app.services.cartesia import CartesiaStt, CartesiaTts
 from app.services.voice_session import VoiceSession
 
@@ -93,7 +94,7 @@ async def voice_stream(ws: WebSocket) -> None:
 
         async def respond(text: str, history: list[dict]) -> dict:
             current = intake_service.current_session(db, user)
-            reply = await intake_service.handle_message(db, user, current, text, "voice", history, tool_handler_for(db, user))
+            reply = await intake_service.handle_message(db, user, current, text, "voice", history, tool_handler_for(db, user), f"v{uuid4().hex[:10]}")
             return IntakeReplyOut(**reply.__dict__).model_dump()
 
         voice = VoiceSession(sess.id, ws.send_json, respond, stt, tts)
@@ -117,6 +118,8 @@ async def voice_stream(ws: WebSocket) -> None:
                     await voice.user_turn(str(data["text"])[:2000])
                 elif kind == "history" and isinstance(data.get("items"), list):
                     voice.set_history(data["items"])
+                elif kind == "greet":
+                    await voice.greet(names.greeting(user))
                 elif kind == "session.end":
                     break
         except WebSocketDisconnect:

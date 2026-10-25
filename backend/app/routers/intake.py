@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.errors import ApiError
 from app.models import Encounter, HandoffPacket, IntakeField, IntakeSession, User
-from app.routers.scheduling import recommendations
+from app.routers.scheduling import SearchIn, search
 from app.schemas import (
     ConfirmFieldIn,
     ConsentIn,
@@ -19,12 +19,12 @@ from app.schemas import (
     IntakeMessageIn,
     IntakeReplyOut,
     IntakeSnapshot,
-    RecommendationIn,
     SkipIn,
     StudentEncounterOut,
+    SummarySubmitIn,
 )
 from app.security import require_student
-from app.services import audit, intake_service, llm_gateway
+from app.services import audit, intake_service, llm_gateway, names, previsit
 from app.services.intake_fields import FIELD_KEYS, LABELS, FieldError, display, validate
 from app.timeutil import to_local, utcnow
 
@@ -44,6 +44,10 @@ def snapshot(db: Session, sess: IntakeSession) -> IntakeSnapshot:
         session_id=sess.id, status=sess.status, safety_state=sess.safety_state, voice_consent=sess.voice_consent,
         transcription_consent=sess.transcription_consent, photo_consent=sess.photo_consent, fields=[field_out(f) for f in fields],
         missing_fields=intake_service.missing(db, sess), skipped_fields=list(sess.skipped_fields or []),
+        conversation_state=(sess.conversation or {}).get("state", "GREETING"), declined=list((sess.conversation or {}).get("declined", [])), unknown=list((sess.conversation or {}).get("unknown", [])),
+        transcript=list((sess.conversation or {}).get("transcript", [])), started_at=sess.created_at, ended_at=sess.ended_at,
+        chief_concern=sess.chief_concern, purpose=sess.purpose, absence_requested=bool(sess.absence_requested),
+        summary=previsit.status_for_session(db, sess), linked_encounter_id=(e.id if (e := previsit.session_encounter(db, sess)) else None),
     )
 
 
@@ -64,14 +68,31 @@ def tool_handler_for(db: Session, user: User):
             return "Recorded as unconfirmed drafts for the student to review."
         if name == "request_ui_action":
             return f"Shown on the student's screen: {args.get('action')}."
+        if name == "list_clinicians":
+            from app.services import availability
+
+            return llm_gateway.dumps([{"name": availability.profile_out(db, p)["name"], "specialty": p.specialty, "appointment_types": p.appointment_types, "clinic": p.clinic_name} for p in availability.active_profiles(db)])
         if name == "get_ranked_slots":
+            from app.services import availability, dialog
+
+            names = [(p.clinician_id, availability.profile_out(db, p)["name"]) for p in availability.active_profiles(db)]
+            who = (args.get("clinician") or "any").strip()
+            cid = None if who.lower() in ("", "any", "none") else dialog.match_clinician(who, names)
+            if who.lower() not in ("", "any", "none") and cid is None:
+                return llm_gateway.dumps({"error": f"No clinician named '{who}' in this demo.", "clinicians": [n for _, n in names]})
             t = args.get("appointment_type")
-            recs = recommendations(RecommendationIn(appointment_type=None if t in (None, "any") else t), user, db)
-            top = [
-                {"when": f"{o.slot.starts_at:%a %b %d %I:%M %p}", "clinic": o.slot.clinic_name, "travel_min": o.slot.travel_minutes, "reasons": o.reason_codes}
-                for o in recs.options[:3]
-            ]
-            return llm_gateway.dumps({"source_mode": "demo", "calendar_considered": recs.calendar_considered, "top_options": top, "note": "Synthetic demo inventory. The student books on the Appointments screen."})
+            day = args.get("day") or "any"
+            req = SearchIn(appointment_type=t if t and t != "any" else (handle.sched_type or "general_consultation"), clinician_id=cid,
+                           start=None if day == "any" else date.fromisoformat(day), days=1 if day != "any" else 5,
+                           part_of_day=args.get("part_of_day") or "any", sort=args.get("sort") or "best", per_clinician=4)
+            result = search(db, user, req)
+            handle.last_schedule = result  # shown to the student as selectable cards
+            return llm_gateway.dumps({
+                "source_mode": "demo", "notice": result["notice"],
+                "clinicians": [{"name": c["name"], "specialty": c["specialty"], "first_slots": [s["starts_at"] for s in c["slots"][:3]]} for c in result["clinicians"]],
+                "alternatives": {k: [(s["clinician_name"], s["starts_at"]) for s in v[:3]] for k, v in result["alternatives"].items()},
+                "note": "Synthetic demo availability. The student confirms a slot on screen; you cannot book.",
+            })
         if name == "list_calendar_events":
             from app.routers.student import calendar_events
 
@@ -80,7 +101,15 @@ def tool_handler_for(db: Session, user: User):
             return llm_gateway.dumps([{"course": e.course_code or e.title, "start": f"{e.start_at:%I:%M %p}", "end": f"{e.end_at:%I:%M %p}"} for e in ev.events])
         raise ValueError("unknown tool")
 
+    handle.last_schedule = None
+    handle.sched_type = None
     return handle
+
+
+@router.get("/assistant/greeting")
+def assistant_greeting(user: User = Depends(require_student)) -> dict:
+    """The opening line for Talk to CuraLink, built from the signed-in student's profile (shown and spoken)."""
+    return {"text": names.greeting(user)}
 
 
 @router.post("/intake/sessions", response_model=IntakeSnapshot)
@@ -129,7 +158,7 @@ def summary(user: User = Depends(require_student), db: Session = Depends(get_db)
 def new_session(user: User = Depends(require_student), db: Session = Depends(get_db)) -> IntakeSnapshot:
     old = intake_service.current_session(db, user, create=False)
     if old:
-        old.status = "CLOSED"
+        old.status, old.ended_at = "CLOSED", utcnow()
         db.commit()
     return snapshot(db, intake_service.current_session(db, user))
 
@@ -150,7 +179,7 @@ async def message(body: IntakeMessageIn, user: User = Depends(require_student), 
     sess = own_session(db, user, body.session_id) if body.session_id else intake_service.current_session(db, user)
     if body.channel == "voice" and not sess.voice_consent:
         raise ApiError(403, "VOICE_CONSENT_REQUIRED", "Turn on voice consent before sending spoken messages.")
-    reply = await intake_service.handle_message(db, user, sess, body.message, body.channel, [h.model_dump() for h in body.history], tool_handler_for(db, user))
+    reply = await intake_service.handle_message(db, user, sess, body.message, body.channel, [h.model_dump() for h in body.history], tool_handler_for(db, user), body.client_turn_id)
     return IntakeReplyOut(**reply.__dict__)
 
 
@@ -210,14 +239,13 @@ def acknowledge_safety(session_id: str, user: User = Depends(require_student), d
     return snapshot(db, sess)
 
 
-# ---- consentful handoff to the assigned clinician ---------------------------
+# ---- student-approved pre-visit summaries (services/previsit.py) ------------------------
 
-def _handoff_out(p: HandoffPacket) -> HandoffOut:
-    return HandoffOut(packet_id=p.id, encounter_id=p.encounter_id, version=p.version, status=p.status, shared_at=p.student_approved_at, field_keys=[f["key"] for f in p.field_snapshot], attachment_ids=list(p.attachment_ids or []))
-
-
-def _latest_packet(db: Session, encounter_id: str) -> HandoffPacket | None:
-    return db.scalar(select(HandoffPacket).where(HandoffPacket.encounter_id == encounter_id).order_by(HandoffPacket.version.desc()))
+def _handoff_out(db: Session, p: HandoffPacket) -> HandoffOut:
+    st = previsit.status_for_session(db, db.get(IntakeSession, p.session_id)) if p.session_id else None
+    return HandoffOut(packet_id=p.id, encounter_id=p.encounter_id, session_id=p.session_id, version=p.version, status=p.status, shared_at=p.student_approved_at,
+                      field_keys=[f["key"] for f in p.field_snapshot], attachment_ids=list(p.attachment_ids or []), consent_text=p.consent_text,
+                      clinician_name=(st or {}).get("clinician_name") if st and st["packet_id"] == p.id else None)
 
 
 @router.get("/students/me/encounters", response_model=list[StudentEncounterOut])
@@ -225,61 +253,47 @@ def my_encounters(user: User = Depends(require_student), db: Session = Depends(g
     rows = db.execute(select(Encounter, User).join(User, Encounter.clinician_id == User.id).where(Encounter.student_id == user.id, Encounter.status != "CANCELLED").order_by(Encounter.starts_at)).all()
     out = []
     for enc, doc in rows:
-        p = _latest_packet(db, enc.id)
-        out.append(StudentEncounterOut(id=enc.id, appointment_id=enc.appointment_id, starts_at=to_local(enc.starts_at, user.timezone), visit_type=enc.visit_type, clinician_name=doc.display_name, status=enc.status, handoff=_handoff_out(p) if p else None, source_mode=enc.source_mode))
+        p = previsit.current_for_encounter(db, enc)
+        out.append(StudentEncounterOut(id=enc.id, appointment_id=enc.appointment_id, starts_at=to_local(enc.starts_at, user.timezone), visit_type=enc.visit_type, clinician_name=doc.display_name, status=enc.status, handoff=_handoff_out(db, p) if p else None, source_mode=enc.source_mode))
     return out
+
+
+@router.post("/intake/sessions/{session_id}/summary", response_model=HandoffOut)
+def submit_summary(session_id: str, body: SummarySubmitIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> HandoffOut:
+    """Student approves a versioned pre-visit summary of THIS conversation (before or after booking)."""
+    sess = own_session(db, user, session_id)
+    p = previsit.submit(db, user, sess, body.field_keys, body.attachment_ids, body.include_purpose, body.include_absence_request, body.encounter_id, body.student_authorized)
+    return _handoff_out(db, p)
 
 
 @router.post("/encounters/{encounter_id}/handoff", response_model=HandoffOut)
 def handoff(encounter_id: str, body: HandoffIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> HandoffOut:
-    enc = db.get(Encounter, encounter_id)
-    if enc is None or enc.student_id != user.id or enc.status == "CANCELLED":
-        raise ApiError(404, "NOT_FOUND", "Appointment not found.")
-    if not body.student_authorized:
-        raise ApiError(400, "AUTHORIZATION_REQUIRED", "Confirm that you want to share these details with your clinician.")
+    """Older client contract: share the current conversation with this appointment's clinician."""
     sess = intake_service.current_session(db, user, create=False)
     if sess is None:
         raise ApiError(409, "NO_INTAKE", "There's nothing to share yet.")
-    have = intake_service.fields_of(db, sess)
-    chosen = []
-    for key in dict.fromkeys(body.field_keys):
-        f = have.get(key)
-        if f is None:
-            raise ApiError(422, "UNKNOWN_FIELD", "One of the selected details no longer exists.", details={"key": key})
-        if not f.confirmed_by_student:
-            raise ApiError(409, "FIELD_NOT_CONFIRMED", "Review and confirm each detail before sharing it.", details={"key": key})
-        chosen.append(f)
-    from app.models import Attachment
-
-    for aid in body.attachment_ids:
-        a = db.get(Attachment, aid)
-        if a is None or a.student_id != user.id or a.session_id != sess.id:
-            raise ApiError(422, "UNKNOWN_ATTACHMENT", "One of the selected photos no longer exists.")
-    prev = _latest_packet(db, enc.id)
-    packet = HandoffPacket(attachment_ids=list(dict.fromkeys(body.attachment_ids)),
-        id=f"pkt_{uuid4().hex[:10]}", encounter_id=enc.id, session_id=sess.id, version=(prev.version + 1) if prev else 1,
-        field_snapshot=[{"key": f.key, "label": LABELS[f.key], "value": f.value, "display": display(f.key, f.value), "provenance": f.provenance, "confirmed_by_student": True, "updated_at": f.updated_at.isoformat()} for f in chosen],
-        source_mode="demo",
-    )
-    db.add(packet)
-    if prev and prev.status == "SHARED":
-        prev.status = "SUPERSEDED"
-    sess.status = "SHARED"
-    from_state, enc.status = enc.status, "INTAKE_SHARED"
-    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="INTAKE_SHARED_WITH_CLINICIAN", object_type="encounter", object_id=enc.id, from_state=from_state, to_state="INTAKE_SHARED", detail=f"{len(chosen)} fields, {len(packet.attachment_ids)} photos, v{packet.version}")
-    db.commit()
-    return _handoff_out(packet)
+    p = previsit.submit(db, user, sess, body.field_keys, body.attachment_ids, False, False, encounter_id, body.student_authorized)
+    return _handoff_out(db, p)
 
 
 @router.post("/handoffs/{packet_id}/withdraw", response_model=HandoffOut)
 def withdraw(packet_id: str, user: User = Depends(require_student), db: Session = Depends(get_db)) -> HandoffOut:
-    p = db.get(HandoffPacket, packet_id)
-    enc = db.get(Encounter, p.encounter_id) if p else None
-    if p is None or enc is None or enc.student_id != user.id:
-        raise ApiError(404, "NOT_FOUND", "Shared intake not found.")
-    if p.status == "SHARED":
-        p.status, p.withdrawn_at = "WITHDRAWN", utcnow()
-        enc.status = "UPCOMING"
-        audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="INTAKE_WITHDRAWN", object_type="encounter", object_id=enc.id, to_state="WITHDRAWN", detail="viewed by clinician before withdrawal" if p.clinician_viewed_at else None)
+    return _handoff_out(db, previsit.withdraw(db, user, packet_id))
+
+
+@router.get("/students/me/previsit-summaries")
+def my_summaries(user: User = Depends(require_student), db: Session = Depends(get_db)) -> list[dict]:
+    """The student's OWN conversations that have a submitted summary, newest first."""
+    rows = db.scalars(select(IntakeSession).where(IntakeSession.student_id == user.id).order_by(IntakeSession.created_at.desc())).all()
+    return [{"session_id": s.id, "started_at": s.created_at, "ended_at": s.ended_at, **st} for s in rows if (st := previsit.status_for_session(db, s))]
+
+
+@router.post("/intake/sessions/{session_id}/end", response_model=IntakeSnapshot)
+def end_session(session_id: str, user: User = Depends(require_student), db: Session = Depends(get_db)) -> IntakeSnapshot:
+    """End a conversation. Its fields, photos and approved summaries are preserved; the next message starts fresh."""
+    sess = own_session(db, user, session_id)
+    if sess.status == "OPEN":
+        sess.status, sess.ended_at = "CLOSED", utcnow()
+        audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="CONVERSATION_ENDED", object_type="intake_session", object_id=sess.id)
         db.commit()
-    return _handoff_out(p)
+    return snapshot(db, sess)

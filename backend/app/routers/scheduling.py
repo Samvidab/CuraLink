@@ -1,190 +1,252 @@
+"""Clinician-aware scheduling: clinician + time recommendations, explicit confirmation, safe booking."""
+
+from collections import Counter
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import curalink_config as cfg
+from app import serializers as ser
 from app.config import get_settings
 from app.db import get_db
 from app.errors import ApiError
-from app.models import Appointment, Calendar, CalendarEvent, ClinicSlot, Course, Encounter, User
+from app.models import Appointment, Calendar, CalendarEvent, ClinicianProfile, ClinicSlot, Course, Encounter, IntakeField, IntakeSession, User
 from app.routers.student import appointment_summary
 from app.routers.system import _demo_only
-from app.schemas import (
-    AppointmentSummary,
-    AppointmentType,
-    BlockIn,
-    CalendarEventOut,
-    ConfirmIn,
-    ConfirmOut,
-    ConflictOut,
-    OptionOut,
-    RecommendationIn,
-    RecommendationsOut,
-    RejectedOut,
-    SlotOut,
-    SlotsOut,
-)
-from app import serializers as ser
+from app.schemas import AppointmentSummary, BlockIn, CalendarEventOut, SchedulePreferences
 from app.security import require_student
-from app.services import audit, scheduling
-from app.services.clinic_adapter import get_adapter
+from app.services import audit, availability, previsit, scheduling, terms
 from app.timeutil import as_utc, demo_now, to_local, utcnow
 
 router = APIRouter(prefix="/api/v1", tags=["scheduling"])
+TYPE_LABEL = {t["id"]: t["label"] for t in cfg.APPOINTMENT_TYPES}
 
 
-def slot_out(s: ClinicSlot, tz: str) -> SlotOut:
-    return SlotOut(
-        id=s.id, clinic_id=s.clinic_id, clinic_name=s.clinic_name, location=s.location, appointment_type=s.appointment_type,
-        starts_at=to_local(s.starts_at, tz), ends_at=to_local(s.ends_at, tz), travel_minutes=s.travel_minutes,
-        status=s.status, permitted=s.permitted, source_mode=s.source_mode,
-    )
+class SearchIn(BaseModel):
+    appointment_type: str = "routine_checkup"
+    clinician_id: str | None = None  # explicit preference: results are ONLY this clinician
+    specialty: str | None = None
+    attribute: dict[str, str] | None = None  # e.g. {"gender": "woman"}; only self-reported profile attributes
+    start: date | None = None  # local date; defaults to the demo "today"
+    days: int = Field(5, ge=1, le=21)
+    part_of_day: Literal["any", "morning", "afternoon", "evening"] = "any"
+    sort: Literal["best", "earliest"] = "best"
+    per_clinician: int = Field(8, ge=1, le=40)
+    preferences: SchedulePreferences = SchedulePreferences()
 
 
-def _window(start: str | None, days: int, tz: str) -> tuple[datetime, datetime]:
-    first = date.fromisoformat(start) if start else get_settings().demo_today
-    zone = ZoneInfo(tz)
-    return datetime.combine(first, time.min, zone), datetime.combine(first + timedelta(days=days), time.min, zone)
+class ConfirmIn(BaseModel):
+    slot_id: str
+    student_approved: bool
+    idempotency_key: str = Field(min_length=8, max_length=80)
+    intake_session_id: str | None = None  # the conversation this booking came from (default: the open one, if it has content)
+    purpose: str | None = Field(None, max_length=300)  # student's own words; never inferred symptoms
+    absence_requested: bool | None = None  # student wants to DISCUSS absence documentation; not an approval
 
 
-def _busy(db: Session, student: User, lo: datetime, hi: datetime) -> list[scheduling.Interval]:
+def _now() -> datetime:
+    s = get_settings()
+    return demo_now(s.demo_today, s.demo_timezone)
+
+
+def busy_for(db: Session, student: User, lo: datetime, hi: datetime) -> list[scheduling.Interval]:
+    """Selected-semester class meetings, personal blocks and the student's other appointments."""
     codes = {c.id: c.code for c in db.scalars(select(Course).where(Course.student_id == student.id))}
-    events = db.scalars(
-        select(CalendarEvent).where(CalendarEvent.student_id == student.id, CalendarEvent.start_at < hi, CalendarEvent.end_at > lo, CalendarEvent.all_day.is_(False))
-    ).all()
-    busy = [
-        scheduling.Interval(as_utc(e.start_at), as_utc(e.end_at), (codes.get(e.course_id) if e.course_id else None) or e.summary, e.id)
-        for e in events
-    ]
-    # Existing demo appointments are busy time too.
-    for appt, slot in db.execute(
-        select(Appointment, ClinicSlot).join(ClinicSlot).where(Appointment.student_id == student.id, Appointment.state == "DEMO_CONFIRMED")
-    ).all():
-        busy.append(scheduling.Interval(as_utc(slot.starts_at), as_utc(slot.ends_at), "Personal: existing demo appointment", appt.id))
+    events = db.scalars(select(CalendarEvent).where(CalendarEvent.student_id == student.id, CalendarEvent.start_at < hi, CalendarEvent.end_at > lo, CalendarEvent.all_day.is_(False), terms.term_filter(terms.selected(db, student)))).all()
+    busy = [scheduling.Interval(as_utc(e.start_at), as_utc(e.end_at), (codes.get(e.course_id) if e.course_id else None) or e.summary, e.id) for e in events]
+    for appt, slot in db.execute(select(Appointment, ClinicSlot).join(ClinicSlot).where(Appointment.student_id == student.id, Appointment.state == "DEMO_CONFIRMED", ClinicSlot.starts_at < hi, ClinicSlot.ends_at > lo)).all():
+        busy.append(scheduling.Interval(as_utc(slot.starts_at), as_utc(slot.ends_at), "Personal: your other appointment", appt.id))
     return busy
 
 
-def _to_slot(s: ClinicSlot) -> scheduling.Slot:
-    return scheduling.Slot(s.id, as_utc(s.starts_at), as_utc(s.ends_at), s.appointment_type, s.travel_minutes, s.status == "AVAILABLE", s.permitted)
+def _part(local: datetime) -> str:
+    return "morning" if local.hour < 12 else "afternoon" if local.hour < 17 else "evening"
 
 
-def _conflicts(cs: list[scheduling.Conflict]) -> list[ConflictOut]:
-    return [ConflictOut(label=c.label.removeprefix("Personal: "), event_id=c.ref_id, kind=c.kind, overlap_minutes=c.overlap_minutes) for c in cs]
+def _matches_attribute(p: ClinicianProfile, attribute: dict[str, str] | None) -> bool:
+    if not attribute:
+        return True
+    attrs = p.attributes or {}
+    return all(isinstance(attrs.get(k), dict) and attrs[k].get("source") and attrs[k].get("value") == v for k, v in attribute.items())
 
 
-@router.get("/clinic/slots", response_model=SlotsOut)
-def list_slots(
-    start: str | None = Query(None),
-    days: int = Query(5, ge=1, le=21),
-    appointment_type: str | None = Query(None),
-    user: User = Depends(require_student),
-    db: Session = Depends(get_db),
-) -> SlotsOut:
-    adapter = get_adapter(db)
-    lo, hi = _window(start, days, user.timezone)
-    return SlotsOut(
-        slots=[slot_out(s, user.timezone) for s in adapter.list_slots(lo, hi, appointment_type)],
-        inventory_updated_at=adapter.inventory_updated_at(),
-        source_mode=adapter.source_mode,
-        appointment_types=[AppointmentType(**t) for t in adapter.appointment_types()],
-    )
+def _slot_out(c: availability.Candidate, p: ClinicianProfile, name: str, tz: str, r: scheduling.Ranked | None) -> dict:
+    return {
+        "id": c.id, "clinician_id": c.clinician_id, "clinician_name": name, "appointment_type": c.appointment_type, "appointment_label": TYPE_LABEL.get(c.appointment_type, c.appointment_type),
+        "starts_at": to_local(c.starts_at, tz).isoformat(), "ends_at": to_local(c.ends_at, tz).isoformat(), "minutes": int((c.ends_at - c.starts_at).total_seconds() // 60),
+        "clinic_name": p.clinic_name, "location": p.location, "travel_minutes": p.travel_minutes,
+        "score": r.score if r else None, "reason_codes": r.reason_codes if r else [], "source_mode": "demo",
+    }
 
 
-@router.post("/schedule/recommendations", response_model=RecommendationsOut)
-def recommendations(body: RecommendationIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> RecommendationsOut:
-    s = get_settings()
-    adapter = get_adapter(db)
+def _rank_for(db: Session, user: User, p: ClinicianProfile, req: SearchIn, first: date, days: int) -> tuple[list[tuple[availability.Candidate, scheduling.Ranked]], Counter]:
+    now = _now()
     tz = user.timezone
-    lo, hi = _window(body.start, body.days, tz)
-    slots = adapter.list_slots(lo, hi, None)  # type filtering happens in the engine so it can explain rejections
-    if body.appointment_type and body.appointment_type not in {t["id"] for t in adapter.appointment_types()}:
-        raise ApiError(422, "UNKNOWN_APPOINTMENT_TYPE", "Choose an appointment type offered by the clinic.")
-    p = body.preferences
-    prefs = scheduling.Preferences(
-        appointment_type=body.appointment_type, avoid_class_conflicts=p.avoid_class_conflicts, max_travel_minutes=p.max_travel_minutes,
-        earliest_hour=p.earliest_hour, latest_hour=p.latest_hour, allow_conflicts=p.allow_conflicts,
-    )
+    cands = availability.candidates(db, p, req.appointment_type, first, days, now)
+    if req.part_of_day != "any":
+        cands = [c for c in cands if _part(to_local(c.starts_at, tz)) == req.part_of_day]
+    by_id = {c.id: c for c in cands}
+    slots = [scheduling.Slot(c.id, c.starts_at, c.ends_at, c.appointment_type, p.travel_minutes) for c in cands]
+    lo = datetime.combine(first, time.min, ZoneInfo(tz))
+    pref = req.preferences
     ranked, rejected = scheduling.rank_slots(
-        [_to_slot(x) for x in slots], _busy(db, user, lo - timedelta(hours=2), hi + timedelta(hours=2)), prefs, demo_now(s.demo_today, tz), ZoneInfo(tz)
+        slots, busy_for(db, user, lo - timedelta(hours=2), lo + timedelta(days=days, hours=2)),
+        scheduling.Preferences(appointment_type=req.appointment_type, avoid_class_conflicts=pref.avoid_class_conflicts, max_travel_minutes=pref.max_travel_minutes, earliest_hour=pref.earliest_hour, latest_hour=pref.latest_hour, allow_conflicts=pref.allow_conflicts),
+        now, ZoneInfo(tz),
     )
-    by_id = {x.id: x for x in slots}
+    if req.sort == "earliest":
+        ranked.sort(key=lambda r: (r.slot.starts_at, r.score, r.slot.id))
+    return [(by_id[r.slot.id], r) for r in ranked], Counter(r.reason_code for r in rejected)
+
+
+def search(db: Session, user: User, req: SearchIn) -> dict:
+    """The single source of appointment options for the Appointments page AND the assistant."""
+    if req.appointment_type not in TYPE_LABEL:
+        raise ApiError(422, "UNKNOWN_APPOINTMENT_TYPE", "Choose an appointment type offered by the clinic.")
+    tz = user.timezone
+    first = req.start or get_settings().demo_today
+    profiles = availability.active_profiles(db)
+    requested = None
+    if req.clinician_id:
+        requested = next((p for p in profiles if p.clinician_id == req.clinician_id), None)
+        if requested is None:
+            raise ApiError(404, "UNKNOWN_CLINICIAN", "That clinician isn't available for booking in this demo.")
+        profiles = [requested]
+    if req.specialty:
+        profiles = [p for p in profiles if p.specialty == req.specialty]
+    if req.attribute:
+        profiles = [p for p in profiles if _matches_attribute(p, req.attribute)]
+    names = {u.id: u.display_name for u in db.scalars(select(User).where(User.role == "clinician")).all()}
+
+    cards, flat, rejected_total = [], [], Counter()
+    for p in profiles:
+        offers_type = req.appointment_type in (p.appointment_types or [])
+        pairs, rejected = _rank_for(db, user, p, req, first, req.days) if offers_type else ([], Counter())
+        rejected_total.update(rejected)
+        slots = [_slot_out(c, p, names.get(p.clinician_id, p.clinician_id), tz, r) for c, r in pairs]
+        flat.extend(slots)
+        cards.append({**availability.profile_out(db, p), "offers_type": offers_type, "slots": slots[: req.per_clinician], "total_available": len(slots), "excluded": dict(rejected)})
+    if req.sort == "earliest":
+        flat.sort(key=lambda s: (s["starts_at"], s["score"] or 0, s["id"]))
+    else:
+        flat.sort(key=lambda s: (s["score"] or 0, s["starts_at"], s["id"]))
+    cards.sort(key=lambda c: (not c["slots"], c["slots"][0]["starts_at"] if c["slots"] else "", c["name"]))
+
+    notice, alternatives = None, {"same_clinician": [], "other_clinicians": []}
+    if requested and not flat:
+        name = names.get(requested.clinician_id, "That clinician")
+        if req.appointment_type not in (requested.appointment_types or []):
+            notice = f"{name} doesn't offer {TYPE_LABEL[req.appointment_type].lower()} visits."
+        else:
+            notice = f"{name} has no openings that fit your classes in this window."
+            later, _ = _rank_for(db, user, requested, req.model_copy(update={"part_of_day": "any"}), first + timedelta(days=req.days), 14)
+            alternatives["same_clinician"] = [_slot_out(c, requested, name, tz, r) for c, r in later[:4]]
+        others = [p for p in availability.active_profiles(db) if p.clinician_id != requested.clinician_id]
+        for p in others:
+            pairs, _ = _rank_for(db, user, p, req, first, req.days) if req.appointment_type in (p.appointment_types or []) else ([], Counter())
+            alternatives["other_clinicians"] += [_slot_out(c, p, names.get(p.clinician_id, p.clinician_id), tz, r) for c, r in pairs[:2]]
+    elif not flat:
+        notice = "No eligible appointments matched your calendar. Try another date or contact the clinic." if profiles else "No clinician matches that preference in this demo."
     has_calendar = db.scalar(select(Calendar.id).where(Calendar.student_id == user.id)) is not None
-    return RecommendationsOut(
-        options=[
-            OptionOut(rank=i + 1, slot=slot_out(by_id[r.slot.id], tz), score=r.score, reason_codes=r.reason_codes, conflicts=_conflicts(r.conflicts), source_mode=adapter.source_mode)
-            for i, r in enumerate(ranked)
-        ],
-        # Wrong-type slots aren't "rejected" in any useful sense; leave them out of the explanation pane.
-        rejected=[RejectedOut(slot=slot_out(by_id[r.slot.id], tz), reason_code=r.reason_code, conflicts=_conflicts(r.conflicts)) for r in rejected if r.reason_code != "WRONG_APPOINTMENT_TYPE"],
-        calendar_considered=has_calendar,
-        generated_at=utcnow(),
-        source_mode=adapter.source_mode,
-        scoring={
-            "wait_points_per_day": scheduling.WAIT_POINTS_PER_DAY,
-            "travel_points_per_10_min": scheduling.TRAVEL_POINTS_PER_10_MIN,
-            "outside_preferred_hours": scheduling.OUTSIDE_PREFERRED_WINDOW,
-            "tight_gap_penalty": scheduling.TIGHT_GAP_PENALTY,
-        },
-    )
+    return {
+        "appointment_type": req.appointment_type, "appointment_label": TYPE_LABEL[req.appointment_type], "start": first.isoformat(), "days": req.days,
+        "part_of_day": req.part_of_day, "sort": req.sort, "clinician_id": req.clinician_id,
+        "clinicians": cards, "options": flat[:12], "excluded": dict(rejected_total), "notice": notice, "alternatives": alternatives,
+        "calendar_considered": has_calendar, "term": terms.selected(db, user), "source_mode": "demo", "generated_at": utcnow().isoformat(),
+    }
 
 
-@router.post("/appointments/confirm", response_model=ConfirmOut)
-def confirm(body: ConfirmIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> ConfirmOut:
+@router.get("/clinicians")
+def clinicians(user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
+    profiles = availability.active_profiles(db)
+    return {"clinicians": [availability.profile_out(db, p) for p in profiles], "appointment_types": cfg.APPOINTMENT_TYPES,
+            "specialties": sorted({p.specialty for p in profiles}), "source_mode": "demo"}
+
+
+@router.post("/schedule/search")
+def schedule_search(body: SearchIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
+    return search(db, user, body)
+
+
+@router.post("/appointments/confirm")
+def confirm(body: ConfirmIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
     if not body.student_approved:
         raise ApiError(400, "APPROVAL_REQUIRED", "Confirm that you want to reserve this demo time.")
     tz = user.timezone
-    # Idempotency: a repeated request (double click, retry) returns the original result.
     existing = db.scalar(select(Appointment).where(Appointment.student_id == user.id, Appointment.idempotency_key == body.idempotency_key))
-    if existing:
-        if existing.slot_id != body.slot_id:
-            raise ApiError(409, "IDEMPOTENCY_KEY_REUSED", "This confirmation was already used for a different time.")
+    if existing:  # double click / retry / repeated assistant event: same result, no second booking
         slot = db.get(ClinicSlot, existing.slot_id)
-        return ConfirmOut(appointment_id=existing.id, status=existing.state, appointment=appointment_summary(existing, slot, tz), message="Already confirmed.")
-
-    adapter = get_adapter(db)
-    slot = adapter.get(body.slot_id)
-    # Re-run hard constraints against the current calendar before reserving.
-    lo, hi = as_utc(slot.starts_at) - timedelta(hours=3), as_utc(slot.ends_at) + timedelta(hours=3)
-    conflicts = scheduling.find_conflicts(_to_slot(slot), _busy(db, user, lo, hi))
+        if slot and availability.parse_slot_id(body.slot_id)[1] != as_utc(slot.starts_at):
+            raise ApiError(409, "IDEMPOTENCY_KEY_REUSED", "This confirmation was already used for a different time.")
+        return _confirm_out(db, existing, tz, "Already confirmed.")
+    cand, profile = availability.validate(db, body.slot_id, _now())  # re-check clinician availability NOW
+    conflicts = scheduling.find_conflicts(scheduling.Slot(cand.id, cand.starts_at, cand.ends_at, cand.appointment_type, profile.travel_minutes), busy_for(db, user, cand.starts_at - timedelta(hours=3), cand.ends_at + timedelta(hours=3)))
     if any(c.kind in ("CLASS_OVERLAP", "PERSONAL_BLOCK") for c in conflicts):
-        raise ApiError(409, "CLASS_CONFLICT", "This time overlaps with your schedule. Pick another option.", details={"conflicts": [c.label for c in conflicts]})
-    slot = adapter.reserve(body.slot_id)
-    appt = Appointment(id=f"apt_{uuid4().hex[:10]}", student_id=user.id, slot_id=slot.id, state="DEMO_CONFIRMED", confirmation_mode="demo", idempotency_key=body.idempotency_key)
+        raise ApiError(409, "CLASS_CONFLICT", "This time overlaps with your schedule or another appointment. Pick another option.", details={"conflicts": [c.label.removeprefix("Personal: ") for c in conflicts]})
+    sess = _booking_session(db, user, body.intake_session_id)
+    slot = availability.book(db, cand, profile)
+    purpose = (body.purpose or "").strip() or (sess.purpose if sess else None)
+    absence = body.absence_requested if body.absence_requested is not None else bool(sess and sess.absence_requested)
+    appt = Appointment(id=f"apt_{uuid4().hex[:10]}", student_id=user.id, slot_id=slot.id, clinician_id=cand.clinician_id, appointment_type=cand.appointment_type, state="DEMO_CONFIRMED",
+                       confirmation_mode="demo", idempotency_key=body.idempotency_key, intake_session_id=sess.id if sess else None, purpose=purpose, absence_requested=absence)
     db.add(appt)
-    if slot.clinician_id:
-        db.add(Encounter(id=f"enc_{uuid4().hex[:10]}", student_id=user.id, clinician_id=slot.clinician_id, appointment_id=appt.id, starts_at=slot.starts_at, visit_type=next((t["label"] for t in adapter.appointment_types() if t["id"] == slot.appointment_type), slot.appointment_type), status="UPCOMING"))
-    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DEMO_CONFIRMED", object_type="appointment", object_id=appt.id, from_state="OFFERED", to_state="DEMO_CONFIRMED", detail=f"slot {slot.id}")
+    db.flush()
+    enc = Encounter(id=f"enc_{uuid4().hex[:10]}", student_id=user.id, clinician_id=cand.clinician_id, appointment_id=appt.id, starts_at=cand.starts_at, visit_type=TYPE_LABEL.get(cand.appointment_type, cand.appointment_type), status="UPCOMING")
+    db.add(enc)
+    db.flush()
+    attached = previsit.attach_pending(db, user.id, enc)  # summaries the student approved "for the clinician I book next"
+    audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_DEMO_CONFIRMED", object_type="appointment", object_id=appt.id, from_state="OFFERED", to_state="DEMO_CONFIRMED",
+                 detail=f"clinician {cand.clinician_id}; case {enc.id}" + (f"; session {sess.id}" if sess else "") + ("; absence documentation requested" if absence else "") + (f"; {attached} summaries attached" if attached else ""))
     db.commit()
-    return ConfirmOut(
-        appointment_id=appt.id, status=appt.state, appointment=appointment_summary(appt, slot, tz),
-        message="Demo appointment — not booked with a real clinic.",
-    )
+    return _confirm_out(db, appt, tz, "Demo appointment — not booked with a real clinic.")
+
+
+def _booking_session(db: Session, user: User, session_id: str | None) -> IntakeSession | None:
+    if session_id:
+        sess = db.get(IntakeSession, session_id)
+        if sess is None or sess.student_id != user.id:
+            raise ApiError(404, "NOT_FOUND", "Conversation not found.")
+        return sess
+    sess = db.scalar(select(IntakeSession).where(IntakeSession.student_id == user.id, IntakeSession.status == "OPEN").order_by(IntakeSession.created_at.desc()))
+    has_content = sess is not None and (sess.chief_concern or sess.purpose or db.scalar(select(IntakeField.id).where(IntakeField.session_id == sess.id)))
+    return sess if has_content else None
+
+
+def _confirm_out(db: Session, appt: Appointment, tz: str, message: str) -> dict:
+    slot = db.get(ClinicSlot, appt.slot_id)
+    enc = db.scalar(select(Encounter).where(Encounter.appointment_id == appt.id))
+    return {"appointment_id": appt.id, "status": appt.state, "external_booking": False, "appointment": appointment_summary(appt, slot, tz, db).model_dump(), "message": message,
+            "case_id": enc.id if enc else None, "intake_session_id": appt.intake_session_id, "purpose": appt.purpose, "absence_requested": bool(appt.absence_requested)}
 
 
 @router.get("/appointments/me", response_model=list[AppointmentSummary])
 def my_appointments(user: User = Depends(require_student), db: Session = Depends(get_db)) -> list[AppointmentSummary]:
-    rows = db.execute(
-        select(Appointment, ClinicSlot).join(ClinicSlot).where(Appointment.student_id == user.id).order_by(ClinicSlot.starts_at)
-    ).all()
-    return [appointment_summary(a, s, user.timezone) for a, s in rows]
+    rows = db.execute(select(Appointment, ClinicSlot).join(ClinicSlot).where(Appointment.student_id == user.id).order_by(ClinicSlot.starts_at)).all()
+    return [appointment_summary(a, s, user.timezone, db) for a, s in rows]
 
 
 @router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentSummary)
 def cancel(appointment_id: str, user: User = Depends(require_student), db: Session = Depends(get_db)) -> AppointmentSummary:
+    """Cancelling frees the clinician's time. Choosing a different clinician = cancel + new booking (both audited)."""
     appt = db.get(Appointment, appointment_id)
     if appt is None or appt.student_id != user.id:
         raise ApiError(404, "NOT_FOUND", "Appointment not found.")
+    slot = db.get(ClinicSlot, appt.slot_id)
     if appt.state == "DEMO_CONFIRMED":
-        get_adapter(db).release(appt.slot_id)
         appt.state = "CANCELLED"
+        if slot and slot.status == "BOOKED":
+            slot.status = "CANCELLED"
         for enc in db.scalars(select(Encounter).where(Encounter.appointment_id == appt.id)):
             enc.status = "CANCELLED"
-        audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_CANCELLED", object_type="appointment", object_id=appt.id, from_state="DEMO_CONFIRMED", to_state="CANCELLED")
+        audit.record(db, actor_role="student", actor_id=user.id, subject_student_id=user.id, action="APPOINTMENT_CANCELLED", object_type="appointment", object_id=appt.id, from_state="DEMO_CONFIRMED", to_state="CANCELLED", detail=f"clinician {appt.clinician_id}")
         db.commit()
-    return appointment_summary(appt, db.get(ClinicSlot, appt.slot_id), user.timezone)
+    return appointment_summary(appt, slot, user.timezone, db)
 
 
 @router.post("/calendar/blocks", response_model=CalendarEventOut)
@@ -198,10 +260,8 @@ def add_block(body: BlockIn, user: User = Depends(require_student), db: Session 
         cal = Calendar(id=f"cal_{uuid4().hex[:10]}", student_id=user.id, source_mode="demo", filename=None, timezone=user.timezone, events_imported=0, warnings=[])
         db.add(cal)
         db.flush()
-    ev = CalendarEvent(
-        id=f"blk_{uuid4().hex[:10]}", calendar_id=cal.id, student_id=user.id, uid=f"block-{uuid4().hex}", summary=f"Personal: {body.label.strip()}",
-        start_at=as_utc(body.start_at), end_at=as_utc(body.end_at), tzid=user.timezone, kind="personal_block", source="manual",
-    )
+    ev = CalendarEvent(id=f"blk_{uuid4().hex[:10]}", calendar_id=cal.id, student_id=user.id, uid=f"block-{uuid4().hex}", summary=f"Personal: {body.label.strip()}",
+                       start_at=as_utc(body.start_at), end_at=as_utc(body.end_at), tzid=user.timezone, kind="personal_block", source="manual")
     db.add(ev)
     db.commit()
     return ser.event(ev, user.timezone, {})
@@ -216,12 +276,16 @@ def delete_block(block_id: str, user: User = Depends(require_student), db: Sessi
     db.commit()
 
 
-@router.post("/demo/slots/{slot_id}/invalidate", response_model=SlotOut, dependencies=[Depends(_demo_only)])
-def invalidate_slot(slot_id: str, user: User = Depends(require_student), db: Session = Depends(get_db)) -> SlotOut:
-    """Demo control: simulate another student taking a slot (stale-slot scenario, AT-05)."""
-    slot = get_adapter(db).get(slot_id)
-    if slot.status == "AVAILABLE":
-        slot.status = "UNAVAILABLE"
-        audit.record(db, actor_role="system", actor_id=None, subject_student_id=user.id, action="DEMO_SLOT_INVALIDATED", object_type="clinic_slot", object_id=slot.id, to_state="UNAVAILABLE")
-        db.commit()
-    return slot_out(slot, user.timezone)
+class OtherBookingIn(BaseModel):
+    slot_id: str
+
+
+@router.post("/demo/book-as-other", dependencies=[Depends(_demo_only)])
+def book_as_other(body: OtherBookingIn, user: User = Depends(require_student), db: Session = Depends(get_db)) -> dict:
+    """Demo control: another (fictional) student books this exact time, to show stale-slot recovery."""
+    cand, profile = availability.validate(db, body.slot_id, _now())
+    slot = availability.book(db, cand, profile)
+    db.add(Appointment(id=f"apt_{uuid4().hex[:10]}", student_id="demo-student-3", slot_id=slot.id, clinician_id=cand.clinician_id, appointment_type=cand.appointment_type, state="DEMO_CONFIRMED", idempotency_key=f"other-{uuid4().hex[:8]}"))
+    audit.record(db, actor_role="system", actor_id=None, subject_student_id=user.id, action="DEMO_SLOT_TAKEN_BY_OTHER", object_type="clinic_slot", object_id=slot.id)
+    db.commit()
+    return {"slot_id": body.slot_id, "status": "BOOKED_BY_SOMEONE_ELSE"}

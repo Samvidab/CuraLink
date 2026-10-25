@@ -29,6 +29,17 @@ def _ensure_seeded() -> None:
 
             reset_demo(db)
             log.info("Seeded fictional demo data.")
+        elif get_settings().demo_mode:
+            from app.services.availability import ensure_demo_data
+            from app.services.names import backfill_demo_names
+
+            backfill_demo_names(db)  # older demo databases: add missing names, keep every record
+            changes = ensure_demo_data(db)  # add missing demo clinician hours; never resets anything
+            from app.services.intake_service import close_untranscribed_sessions
+
+            changes["conversations_ended"] = close_untranscribed_sessions(db)
+            if any(changes.values()):
+                log.warning("Demo data upgrade: %s", changes)
     finally:
         gen.close()
 

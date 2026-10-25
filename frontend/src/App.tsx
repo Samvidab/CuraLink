@@ -10,6 +10,7 @@ import Dashboard from './pages/student/Dashboard'
 import FindCare from './pages/student/FindCare'
 import Assistant from './pages/student/Assistant'
 import Schedule from './pages/student/Schedule'
+import ScheduleReview from './pages/student/ScheduleReview'
 import AbsenceCenter from './pages/student/AbsenceCenter'
 import Settings from './pages/student/Settings'
 import ClinicianDashboard from './pages/clinician/ClinicianDashboard'
@@ -23,11 +24,13 @@ function Splash() {
 }
 
 /** UX-only guard. The server enforces the same rule on every API call (403). */
-function RequireRole({ role, children }: PropsWithChildren<{ role: Role }>) {
-  const { me, loading } = useAuth()
+function RequireRole({ role, children, allowIncomplete = false }: PropsWithChildren<{ role: Role; allowIncomplete?: boolean }>) {
+  const { me, loading, signedOut } = useAuth()
   if (loading) return <Splash/>
-  if (!me) return <Navigate to={role === 'clinician' ? '/clinician/sign-in' : '/student/sign-in'} replace/>
+  if (!me) return <Navigate to={signedOut ? '/' : role === 'clinician' ? '/clinician/sign-in' : '/student/sign-in'} replace/>
   if (me.role !== role) return <Forbidden/>
+  // A student without a name on their profile finishes onboarding first.
+  if (role === 'student' && !me.profile_complete && !allowIncomplete) return <Navigate to="/student/onboarding" replace/>
   return <>{children}</>
 }
 
@@ -37,10 +40,11 @@ function RequireAuth({ children }: PropsWithChildren) {
   return me ? <>{children}</> : <Navigate to="/select-role" replace/>
 }
 
+/** "/" is always the welcome page. A still-valid session is offered ("Continue as …"), never entered silently. */
 function Home() {
-  const { me, loading } = useAuth()
+  const { loading } = useAuth()
   if (loading) return <Splash/>
-  return <Navigate to={me ? `/${me.role}/dashboard` : '/select-role'} replace/>
+  return <Onboarding initialStep={0}/>
 }
 
 export default function App() {
@@ -49,13 +53,14 @@ export default function App() {
     <Route path="/select-role" element={<Onboarding initialStep={0}/>}/>
     <Route path="/clinician/sign-in" element={<Onboarding initialStep={4}/>}/>
     <Route path="/student/sign-in" element={<Onboarding initialStep={5}/>}/>
-    <Route path="/student/onboarding" element={<RequireRole role="student"><Onboarding initialStep={1}/></RequireRole>}/>
-    <Route path="/student/import" element={<RequireRole role="student"><Onboarding initialStep={2}/></RequireRole>}/>
+    <Route path="/student/onboarding" element={<RequireRole role="student" allowIncomplete><Onboarding initialStep={1}/></RequireRole>}/>
+    <Route path="/student/import" element={<RequireRole role="student" allowIncomplete><Onboarding initialStep={2}/></RequireRole>}/>
     <Route path="/student" element={<RequireRole role="student"><StudentShell/></RequireRole>}>
       <Route index element={<Navigate to="dashboard" replace/>}/>
       <Route path="dashboard" element={<Dashboard/>}/>
       <Route path="voice" element={<Assistant/>}/>
       <Route path="calendar" element={<Schedule/>}/>
+      <Route path="schedule-review" element={<ScheduleReview/>}/>
       <Route path="appointments" element={<FindCare/>}/>
       <Route path="cases" element={<AbsenceCenter/>}/>
       <Route path="settings" element={<Settings/>}/>

@@ -21,6 +21,8 @@ export interface VoiceEvents {
   onLevel: (level: number) => void
   onNotice: (message: string) => void
   onMetric?: (m: { ttfa_ms?: number; interrupt_ms?: number }) => void
+  onCancelled?: () => void // the reply being spoken was cut off by the student
+  onGreeting?: (text: string) => void // the opening line being spoken (same text the transcript shows)
 }
 
 type SpeechRecognitionLike = {
@@ -53,6 +55,8 @@ class PcmCapture extends AudioWorkletProcessor {
 }
 registerProcessor('pcm-capture', PcmCapture)`
 
+export const newTurnId = () => (crypto.randomUUID ? crypto.randomUUID() : `t-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+
 const SPEECH_LEVEL = 0.035 // RMS threshold for "user is talking"
 const SPEECH_START_MS = 180
 // Ordinary mid-sentence pauses are often 0.5–1 s; wait longer before ending the turn.
@@ -75,19 +79,22 @@ export class VoiceController {
   private silentSince = 0
   private userTalking = false
   private utteranceStart = 0
+  private preroll: ArrayBuffer[] = [] // mic audio captured before the socket opens (otherwise the first word is lost)
   private muted = false
   private rec: SpeechRecognitionLike | null = null
   private turn = 0
   private active = false
   private history: { role: 'user' | 'assistant'; text: string }[] = []
+  private greeting = ''
 
   constructor(events: VoiceEvents) { this.ev = events }
 
   private set(s: VoiceState) { this.state = s; this.ev.onState(s) }
 
   /** Caller must have obtained explicit voice consent first. */
-  async start(history: { role: 'user' | 'assistant'; text: string }[]) {
+  async start(history: { role: 'user' | 'assistant'; text: string }[], greeting = '') {
     this.history = history.slice(-10)
+    this.greeting = greeting
     this.active = true
     this.set('REQUESTING_MIC')
     try {
@@ -104,7 +111,7 @@ export class VoiceController {
   stop() {
     this.active = false
     try { this.ws?.send(JSON.stringify({ type: 'session.end' })) } catch { /* closing anyway */ }
-    this.ws?.close(); this.ws = null
+    this.ws?.close(); this.ws = null; this.preroll = []
     this.rec?.abort(); this.rec = null
     if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel()
     this.stopPlayback()
@@ -129,6 +136,7 @@ export class VoiceController {
       this.ws?.send(JSON.stringify({ type: 'barge_in' }))
     } else {
       this.turn += 1 // any reply still in flight is now stale
+      if (this.state === 'SPEAKING') this.ev.onCancelled?.()
       speechSynthesis.cancel()
       this.set('INTERRUPTED'); this.set('LISTENING')
     }
@@ -168,7 +176,13 @@ export class VoiceController {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     this.ws = new WebSocket(`${proto}://${location.host}${this.info!.stream_path}`)
     this.ws.binaryType = 'arraybuffer'
-    this.ws.onopen = () => this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
+    this.ws.onopen = () => {
+      this.ws?.send(JSON.stringify({ type: 'history', items: this.history }))
+      // New conversation: the server speaks its greeting (built from the signed-in profile) through Cartesia.
+      if (!this.history.some(h => h.role === 'user')) this.ws?.send(JSON.stringify({ type: 'greet' }))
+      for (const chunk of this.preroll) this.ws?.send(chunk)
+      this.preroll = []
+    }
     this.ws.onmessage = e => this.onServer(JSON.parse(e.data as string))
     this.ws.onclose = ev => {
       if (!this.active) return
@@ -176,7 +190,9 @@ export class VoiceController {
     }
     node.port.onmessage = (e: MessageEvent<{ level?: number; pcm?: ArrayBuffer }>) => {
       if (e.data.level !== undefined) this.vad(e.data.level)
-      if (e.data.pcm && this.ws?.readyState === WebSocket.OPEN && this.state !== 'THINKING') this.ws.send(e.data.pcm)
+      if (!e.data.pcm || this.state === 'THINKING') return
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(e.data.pcm)
+      else if (this.ws?.readyState === WebSocket.CONNECTING && this.preroll.length < 30) this.preroll.push(e.data.pcm) // ≤3 s
     }
   }
 
@@ -216,8 +232,9 @@ export class VoiceController {
       case 'state': if (m.state) this.set(m.state); break
       case 'transcript.partial': this.ev.onPartial(m.text ?? ''); break
       case 'transcript.final': this.acceptedVersion = m.turn_version; this.ev.onUserFinal(m.text ?? ''); break
+      case 'assistant.greeting': this.acceptedVersion = m.turn_version; this.ev.onGreeting?.(m.text ?? ''); break
       case 'assistant.text': if (m.reply && m.turn_version >= this.acceptedVersion) this.ev.onReply(m.reply); break
-      case 'assistant.cancelled': this.acceptedVersion = m.turn_version; this.stopPlayback(); break
+      case 'assistant.cancelled': this.acceptedVersion = m.turn_version; this.stopPlayback(); this.ev.onCancelled?.(); break
       case 'assistant.audio.chunk': if (m.turn_version >= this.acceptedVersion && m.data) this.play(m.data); break
       case 'audio.error': this.ev.onNotice(m.message ?? 'Voice error.'); break
     }
@@ -276,6 +293,15 @@ export class VoiceController {
     this.rec = rec
     try { rec.start() } catch { this.fail('Could not start speech recognition.'); return }
     this.set('LISTENING')
+    if (this.greeting && !this.history.some(h => h.role === 'user')) {
+      this.ev.onGreeting?.(this.greeting)
+      if (this.muted) return
+      const mine = ++this.turn
+      const u = new SpeechSynthesisUtterance(this.greeting)
+      u.onend = () => { if (mine === this.turn && this.active) this.set('LISTENING') }
+      this.set('SPEAKING')
+      speechSynthesis.speak(u)
+    }
   }
 
   private async browserTurn(text: string, spoken = false) {
@@ -285,7 +311,7 @@ export class VoiceController {
     this.set('THINKING')
     let reply: IntakeReply
     try {
-      reply = await api.post<IntakeReply>('/intake/messages', { message: text, channel: spoken ? 'voice' : 'text', history: this.history })
+      reply = await api.post<IntakeReply>('/intake/messages', { message: text, channel: spoken ? 'voice' : 'text', history: this.history, client_turn_id: newTurnId() })
     } catch (e) {
       this.ev.onNotice(e instanceof Error ? e.message : 'Message failed.')
       if (mine === this.turn) this.set('LISTENING')

@@ -31,9 +31,13 @@ Hard rules:
 - Never invent values. Only call propose_intake_fields with information the student literally stated in this conversation. If a temperature has no unit, ask for the unit instead of guessing.
 - You cannot book appointments, send messages, sign or approve documents, or decide absence dates. Point the student to the on-screen controls for those steps.
 - All clinic availability is synthetic demo data; say so if you mention times.
+- Only mention clinicians and times returned by list_clinicians/get_ranked_slots. If a requested clinician has no openings, say so and offer that clinician's next dates before suggesting others. Never infer a clinician's gender or other traits from their name.
 - Sound like a calm, kind person: brief, natural, varied phrasing; usually one or two sentences (never more than three), no lists or markdown. Ask at most one question at a time.
 - Use the conversation so far; don't re-ask for details the student already gave.
-- When the student wants an appointment, call get_ranked_slots, mention one or two options briefly, and call request_ui_action with FIND_CARE so they can confirm on screen. When a detail like temperature, onset date or a photo would be easier to enter in a form, call request_ui_action with OPEN_INTAKE_FORM.
+- The context may give the student's preferred name. The opening greeting already used it, so use it rarely after that (for example once when wrapping up), never in every reply.
+- When the student wants an appointment or asks about clinicians, call get_ranked_slots (or list_clinicians), mention one or two real options briefly, and call request_ui_action with FIND_CARE so they can confirm on screen.
+- The app decides which input card (temperature entry, optional photo upload) appears under your reply and tells you in the context line starting "ON SCREEN". Follow it exactly: ask only what it says, never ask for a temperature or photo it doesn't mention, and never claim something is on screen when it isn't.
+- Only facts from THIS conversation are current. Never carry symptoms over from an earlier conversation as if they were happening now.
 - If the student mentions anything that could be an emergency, tell them to call 911 or go to the nearest emergency department."""
 
 TOOLS: list[dict] = [
@@ -65,16 +69,26 @@ TOOLS: list[dict] = [
     },
     {
         "name": "get_ranked_slots",
-        "description": "Read the top demo clinic appointment options that fit the student's imported class schedule, ranked by wait, travel and fit. Read-only; does not book.",
+        "description": "Look up REAL demo appointment openings (clinician + time) that fit the student's selected-semester classes. Use it whenever the student asks about appointments, a specific clinician, a day, or the earliest time. Read-only; the student confirms on screen.",
         "strict": True,
         "input_schema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["appointment_type"],
+            "required": ["appointment_type", "clinician", "day", "part_of_day", "sort"],
             "properties": {
                 "appointment_type": {"type": "string", "enum": ["routine_checkup", "vaccination", "mental_health", "general_consultation", "any"]},
+                "clinician": {"type": "string", "description": "A clinician's name exactly as the student said it, or 'any'."},
+                "day": {"type": "string", "description": "YYYY-MM-DD for a specific day, or 'any' for the next school week."},
+                "part_of_day": {"type": "string", "enum": ["any", "morning", "afternoon", "evening"]},
+                "sort": {"type": "string", "enum": ["best", "earliest"]},
             },
         },
+    },
+    {
+        "name": "list_clinicians",
+        "description": "List the clinicians in this demo with specialty and appointment types. Never invent clinicians.",
+        "strict": True,
+        "input_schema": {"type": "object", "additionalProperties": False, "required": [], "properties": {}},
     },
     {
         "name": "list_calendar_events",
@@ -102,9 +116,10 @@ TOOLS.append({
 ALLOWED_TOOLS = {t["name"] for t in TOOLS}
 TOOL_LABELS = {
     "propose_intake_fields": "Updating what CuraLink knows",
-    "get_ranked_slots": "Comparing eligible slots",
+    "get_ranked_slots": "Checking clinician schedules",
     "list_calendar_events": "Reading class calendar",
     "request_ui_action": "Opening on your screen",
+    "list_clinicians": "Checking clinicians",
 }
 
 ToolHandler = Callable[[str, dict], Awaitable[str]]
@@ -123,8 +138,85 @@ class LlmUnavailable(Exception):
     """Model not configured, refused, or failed; caller uses the scripted fallback."""
 
 
+# Last Anthropic failure, classified so the UI can say *why* it fell back. Account-level problems
+# (auth/permission/billing) pause calls briefly for the SAME key; transient ones never latch.
+STATUS: dict = {"auth_failed": False, "last_error": None}
+_PAUSE_SECONDS = 120
+_ACCOUNT_LEVEL = {"authentication", "permission", "billing"}
+
+
+def _key_fp() -> str:
+    import hashlib
+
+    return hashlib.sha256((get_settings().anthropic_api_key or "").encode()).hexdigest()[:12]
+
+
+def classify(exc: Exception) -> dict:
+    """Map an SDK exception to {category, http_status, error_type, message}; message has secrets removed."""
+    import re
+    import time
+
+    status_code, etype, msg = None, None, str(exc)
+    if isinstance(exc, anthropic.APIStatusError):
+        status_code = exc.status_code
+        body = exc.body if isinstance(exc.body, dict) else {}
+        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        etype, msg = err.get("type"), err.get("message") or exc.message
+    low = (msg or "").lower()
+    if isinstance(exc, anthropic.APIConnectionError):
+        category = "connection"
+    elif status_code == 401:
+        category = "authentication"
+    elif status_code == 402 or "credit balance" in low or "billing" in low or "payment" in low:
+        category = "billing"
+    elif status_code == 403:
+        category = "permission"
+    elif status_code == 404 or (status_code == 400 and "model" in low and ("not found" in low or "does not exist" in low or "invalid" in low)):
+        category = "model_unavailable"
+    elif status_code == 429:
+        category = "rate_limited"
+    elif status_code in (500, 502, 503, 529) or etype == "overloaded_error":
+        category = "service_unavailable"
+    else:
+        category = "request_error"
+    safe = re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "sk-ant-***", msg or "")[:240]
+    return {"category": category, "http_status": status_code, "error_type": etype, "message": safe, "at": time.time(), "key_fp": _key_fp()}
+
+
+def _record_failure(exc: Exception) -> dict:
+    info = classify(exc)
+    STATUS["last_error"] = info
+    STATUS["auth_failed"] = info["category"] in _ACCOUNT_LEVEL
+    log.warning("anthropic call failed: %s http=%s type=%s", info["category"], info["http_status"], info["error_type"])
+    return info
+
+
 def available() -> bool:
-    return bool(get_settings().anthropic_api_key)
+    if not get_settings().anthropic_api_key:
+        return False
+    err = STATUS.get("last_error")
+    if STATUS["auth_failed"] and err and err.get("key_fp") == _key_fp():
+        import time
+
+        if time.time() - err["at"] < _PAUSE_SECONDS:
+            return False  # don't hammer a rejected key; retried automatically after the pause
+    return True
+
+
+def status() -> str:
+    """live | fallback (no key) | error (last call failed for an account-level reason)."""
+    if not get_settings().anthropic_api_key:
+        return "fallback"
+    err = STATUS.get("last_error")
+    return "error" if STATUS["auth_failed"] and err and err.get("key_fp") == _key_fp() else "live"
+
+
+def detail() -> dict | None:
+    """Sanitized last error for /health (no key material)."""
+    err = STATUS.get("last_error")
+    if not err or err.get("key_fp") != _key_fp():
+        return None
+    return {k: err[k] for k in ("category", "http_status", "error_type", "message")}
 
 
 def _client() -> anthropic.AsyncAnthropic:
@@ -162,15 +254,12 @@ async def run_turn(history: list[dict], user_text: str, context_note: str, handl
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
             )
-        except anthropic.APIConnectionError as exc:
-            raise LlmUnavailable("connection") from exc
-        except anthropic.RateLimitError as exc:
-            raise LlmUnavailable("rate_limited") from exc
-        except anthropic.APIStatusError as exc:
-            log.warning("llm status error %s", exc.status_code)
-            raise LlmUnavailable(f"status_{exc.status_code}") from exc
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+            info = _record_failure(exc)
+            raise LlmUnavailable(info["category"]) from exc
 
         turn.model = response.model
+        STATUS["auth_failed"], STATUS["last_error"] = False, None
         if response.stop_reason == "refusal":
             raise LlmUnavailable("refusal")
         tool_uses = [b for b in response.content if b.type == "tool_use"]
@@ -253,8 +342,8 @@ async def describe_image(png: bytes) -> list[dict]:
                 {"type": "text", "text": VISION_PROMPT},
             ]}],
         )
-    except anthropic.APIError as exc:
-        raise LlmUnavailable("vision_error") from exc
+    except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+        raise LlmUnavailable(_record_failure(exc)["category"]) from exc
     if response.stop_reason == "refusal":
         raise LlmUnavailable("refusal")
     for block in response.content:

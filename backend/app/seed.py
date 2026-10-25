@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 
 from app import db as dbmod
 from app.config import get_settings
-from app.models import ClinicSlot, Encounter, User
+from app.models import Appointment, ClinicianProfile, ClinicSlot, Encounter, User
+from app.services import availability
 from app.security import hash_password
 from app.services import audit
 from app.services.calendar_service import import_calendar
@@ -34,16 +35,26 @@ def reset_demo(db: Session) -> None:
     # One salted hash reused across demo accounts keeps reset fast; all share the published demo password.
     pw = hash_password(DEMO_PASSWORD)
     for s in users["students"]:
-        db.add(User(id=s["id"], role="student", display_name=s["display_name"], email=s["email"], password_hash=pw, timezone=settings.demo_timezone))
+        db.add(User(id=s["id"], role="student", display_name=s["display_name"], first_name=s["first_name"], last_name=s["last_name"], email=s["email"], password_hash=pw, timezone=settings.demo_timezone))
     for c in users["clinicians"]:
-        db.add(User(id=c["id"], role="clinician", display_name=c["display_name"], email=c["email"], password_hash=pw, credentials=c["credentials"], clinician_verified=c["verified"], timezone=settings.demo_timezone))
+        db.add(User(id=c["id"], role="clinician", display_name=c["display_name"], first_name=c["first_name"], last_name=c["last_name"], email=c["email"], password_hash=pw, credentials=c["credentials"], clinician_verified=c["verified"], timezone=settings.demo_timezone))
     db.flush()
 
-    slots = json.loads((data_dir / "demo_slots.json").read_text())
-    for s in slots["slots"]:
-        db.add(ClinicSlot(**{**s, "starts_at": datetime.fromisoformat(s["starts_at"]), "ends_at": datetime.fromisoformat(s["ends_at"])}))
+    availability.load_demo(db)
+    db.flush()
+    # Seeded encounters are real bookings: they occupy the clinician's time like any other appointment.
     for e in users["encounters"]:
-        db.add(Encounter(**{**e, "starts_at": datetime.fromisoformat(e["starts_at"])}))
+        start = datetime.fromisoformat(e["starts_at"])
+        appt_type = e["appointment_type"]
+        profile = db.get(ClinicianProfile, e["clinician_id"])
+        slot = ClinicSlot(id=f"bk_seed_{e['id']}", clinic_id=profile.clinic_id, clinic_name=profile.clinic_name, location=profile.location or "", appointment_type=appt_type,
+                          starts_at=start, ends_at=start + availability.duration(appt_type), travel_minutes=profile.travel_minutes, clinician_id=e["clinician_id"], status="BOOKED", source_mode="demo")
+        appt = Appointment(id=f"apt_seed_{e['id']}", student_id=e["student_id"], slot_id=slot.id, clinician_id=e["clinician_id"], appointment_type=appt_type, state="DEMO_CONFIRMED", idempotency_key=f"seed-{e['id']}")
+        db.add(slot)
+        db.flush()  # the booked interval must exist before the appointment that references it
+        db.add(appt)
+        db.flush()
+        db.add(Encounter(id=e["id"], student_id=e["student_id"], clinician_id=e["clinician_id"], appointment_id=appt.id, starts_at=start, visit_type=e["visit_type"], status=e["status"]))
     db.commit()
 
     for s in users["students"]:

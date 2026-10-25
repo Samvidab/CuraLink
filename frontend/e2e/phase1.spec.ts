@@ -7,7 +7,7 @@ test.beforeEach(async ({ request }) => {
 
 test('student onboarding imports the sample calendar and lands on a live dashboard', async ({ page }) => {
   await page.goto('/')
-  await expect(page).toHaveURL(/select-role/)
+  await expect(page.getByRole('heading', { name: 'Welcome to CuraLink' })).toBeVisible()
   await page.getByRole('button', { name: /I'm a student/ }).click()
   await expect(page).toHaveURL(/student\/sign-in/)
   // Regression: the email/password fields must accept typing (they were effectively read-only before).
@@ -18,10 +18,9 @@ test('student onboarding imports the sample calendar and lands on a live dashboa
   await expect(page.getByRole('alert')).toContainText('incorrect')
   await page.getByLabel('Password').fill('curalink-demo')
   await page.getByLabel('Password').press('Enter')
-  await expect(page.getByRole('heading', { name: 'Tell us about you' })).toBeVisible()
-  await expect(page.getByText('sam.lee@students.example.com')).toBeVisible()
-  await expect(page.getByLabel('Full name')).toHaveValue('Sam Lee')
-  await page.getByRole('button', { name: 'Continue' }).click()
+  // Sam's profile is already complete, so sign-in goes straight to the dashboard (no name prompt).
+  await expect(page).toHaveURL(/student\/dashboard/)
+  await page.goto('/student/import')
   await page.getByRole('button', { name: 'Use fictional sample calendar' }).click()
   await expect(page.getByText('DEMO SAMPLE')).toBeVisible()
   await expect(page.getByText('Contact needed', { exact: true })).toBeVisible() // PHIL 208: no invented email

@@ -1,0 +1,115 @@
+{
+  "_note": "FICTIONAL demo clinician availability. Not a real clinic calendar. Times are local to each clinic's timezone.",
+  "clinics": {
+    "clinic_demo_health": {
+      "name": "Demo Student Health Clinic",
+      "location": "Demo Health Center, Room 120",
+      "travel_minutes": 8,
+      "timezone": "America/Indiana/Indianapolis"
+    },
+    "clinic_demo_westside": {
+      "name": "Demo Westside Clinic",
+      "location": "Demo Westside Plaza, Suite 4",
+      "travel_minutes": 25,
+      "timezone": "America/Indiana/Indianapolis"
+    },
+    "clinic_demo_telehealth": {
+      "name": "Demo Telehealth",
+      "location": "Video visit (demo)",
+      "travel_minutes": 0,
+      "timezone": "America/Indiana/Indianapolis"
+    }
+  },
+  "weekly": [
+    {
+      "clinician_id": "demo-clinician-1",
+      "weekdays": [
+        "MO",
+        "WE",
+        "FR"
+      ],
+      "start": "09:00",
+      "end": "12:00"
+    },
+    {
+      "clinician_id": "demo-clinician-1",
+      "weekdays": [
+        "MO",
+        "WE",
+        "FR"
+      ],
+      "start": "13:30",
+      "end": "16:30"
+    },
+    {
+      "clinician_id": "demo-clinician-1",
+      "weekdays": [
+        "TU",
+        "TH"
+      ],
+      "start": "13:00",
+      "end": "17:00"
+    },
+    {
+      "clinician_id": "demo-clinician-2",
+      "weekdays": [
+        "MO",
+        "TU",
+        "WE"
+      ],
+      "start": "08:00",
+      "end": "12:00"
+    },
+    {
+      "clinician_id": "demo-clinician-2",
+      "weekdays": [
+        "TH"
+      ],
+      "start": "13:00",
+      "end": "17:00"
+    },
+    {
+      "clinician_id": "demo-clinician-3",
+      "weekdays": [
+        "MO",
+        "TU",
+        "WE",
+        "TH",
+        "FR"
+      ],
+      "start": "10:00",
+      "end": "16:00"
+    }
+  ],
+  "exceptions": [
+    {
+      "clinician_id": "demo-clinician-1",
+      "date": "2026-10-29",
+      "kind": "unavailable",
+      "reason": "Conference (fictional)"
+    },
+    {
+      "clinician_id": "demo-clinician-1",
+      "date": "2026-11-23",
+      "end_date": "2026-11-27",
+      "kind": "unavailable",
+      "reason": "Vacation (fictional)"
+    },
+    {
+      "clinician_id": "demo-clinician-2",
+      "date": "2026-10-30",
+      "kind": "extra",
+      "start": "09:00",
+      "end": "12:00",
+      "reason": "Extra Friday clinic (fictional)"
+    },
+    {
+      "clinician_id": "demo-clinician-3",
+      "date": "2026-10-28",
+      "kind": "unavailable",
+      "start": "12:00",
+      "end": "16:00",
+      "reason": "Training afternoon (fictional)"
+    }
+  ]
+}

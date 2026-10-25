@@ -82,12 +82,14 @@ _TEMP = re.compile(r"(\d{2,3}(?:\.\d)?)\s*(?:°|degrees?)?\s*(f|c|fahrenheit|cel
 _TEMP_NO_UNIT = re.compile(r"\b(?:temp(?:erature)?|fever)\D{0,20}(\d{2,3}(?:\.\d)?)\b", re.I)
 _ONSET = re.compile(
     r"\b(since (yesterday|last night|this morning|(last )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the weekend)|"
-    r"(for|about|around) (a|one|two|three|four|five|\d+) (hours?|days?|weeks?)|started (yesterday|today|this morning|last night|on \w+ \d+))\b",
+    r"(for|about|around) (a|one|two|three|four|five|\d+) (hours?|days?|weeks?)|started (yesterday|today|this morning|last night|on \w+ \d+)|"
+    r"((a )?few|a couple( of)?|several|one|two|three|four|five|\d+|a) (hours?|days?|weeks?) ago|yesterday|last night|this morning|today)\b",
     re.I,
 )
 _SYMPTOM_WORDS = re.compile(
     r"\b(feel\w*|sick|ill|unwell|pain|ache|aching|hurt\w*|fever|cough\w*|sore|nause\w*|vomit\w*|dizzy|tired|fatigue\w*|rash|itch\w*|"
-    r"swell\w*|headache|migraine|cold|flu|congest\w*|throat|stomach|diarrh\w*|anxious|anxiety|stress\w*|depress\w*|can'?t sleep|insomnia)\b",
+    r"swell\w*|swollen|headache|migraine|cold|flu|congest\w*|throat|stomach|diarrh\w*|anxious|anxiety|stress\w*|depress\w*|can'?t sleep|insomnia|"
+    r"dry|flak\w*|bruis\w*|bump\w*|blister\w*|burn(ed|t)?|scrape\w*|cut myself|bleed\w*|skin)\b",
     re.I,
 )
 

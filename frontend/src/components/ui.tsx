@@ -19,9 +19,9 @@ export function Icon({ name, size = 20 }: { name: string; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
 
-export function Button({ children, onClick, variant = 'primary', disabled = false, className = '', type = 'button' }: React.PropsWithChildren<{ onClick?: () => void; variant?: 'primary'|'secondary'|'ghost'|'danger'; disabled?: boolean; className?: string; type?: 'button'|'submit' }>) {
+export function Button({ children, onClick, variant = 'primary', disabled = false, className = '', type = 'button', ...aria }: React.PropsWithChildren<{ onClick?: () => void; variant?: 'primary'|'secondary'|'ghost'|'danger'; disabled?: boolean; className?: string; type?: 'button'|'submit'; title?: string; 'aria-label'?: string; 'aria-expanded'?: boolean; 'aria-describedby'?: string }>) {
   const styles = { primary: 'bg-teal-700 text-white hover:bg-teal-800 shadow-sm', secondary: 'bg-white text-slate-700 border border-slate-200 hover:border-teal-300', ghost: 'text-slate-600 hover:bg-slate-100', danger: 'bg-rose-50 text-rose-700 border border-rose-200' }
-  return <button type={type} disabled={disabled} onClick={onClick} className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-teal-200 disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}>{children}</button>
+  return <button type={type} disabled={disabled} onClick={onClick} {...aria} className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-teal-200 disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}>{children}</button>
 }
 
 export function Badge({ children, tone = 'teal' }: React.PropsWithChildren<{ tone?: 'teal'|'blue'|'amber'|'slate'|'rose' }>) {

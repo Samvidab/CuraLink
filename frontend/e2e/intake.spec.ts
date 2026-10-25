@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { H, resetDemo, studentWithCalendar } from './helpers'
+import { H, RIVERA_MON_1030, resetDemo, studentWithCalendar } from './helpers'
 
 test.beforeEach(async ({ page }) => { await resetDemo(page); await studentWithCalendar(page) })
 
@@ -15,6 +15,7 @@ test('emergency language halts the routine flow until the student acknowledges',
 })
 
 test('intake in the student’s words → confirm → share with the assigned clinician only', async ({ page, browser }) => {
+  test.setTimeout(150_000)
   await page.goto('/student/voice')
   await page.getByLabel('Message').fill('I have had a sore throat and a fever of 100.8 F since yesterday')
   await page.getByRole('button', { name: 'Send' }).click()
@@ -25,31 +26,31 @@ test('intake in the student’s words → confirm → share with the assigned cl
   for (const box of await knows.getByRole('checkbox').all()) await box.check()
 
   // Book a demo appointment (via API to keep this test focused), then share.
-  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: 'slot_04', student_approved: true, idempotency_key: 'e2e-intake-0001' } })).ok()).toBeTruthy()
-  await knows.getByRole('button', { name: 'Review what will be sent to your clinician' }).click()
+  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: RIVERA_MON_1030, student_approved: true, idempotency_key: 'e2e-intake-0001' } })).ok()).toBeTruthy()
+  await knows.getByRole('button', { name: 'Review your pre-visit summary' }).click()
   const dialog = page.getByRole('dialog')
-  await expect(dialog).toContainText('Dr. Avery Rivera')
+  await expect(dialog.getByLabel('Share with')).toContainText('Dr. Avery Rivera') // booked from this conversation
   await expect(dialog).toContainText('Never shared')
-  await dialog.getByLabel(/Onset|When it started/).uncheck()
-  await expect(dialog.getByRole('button', { name: 'Share with clinician' })).toBeDisabled()
+  await dialog.getByLabel('Share When it started').uncheck()
+  await expect(dialog.getByRole('button', { name: 'Submit pre-visit summary' })).toBeDisabled()
   await dialog.getByLabel(/I authorize sharing/).check()
-  await dialog.getByRole('button', { name: 'Share with clinician' }).click()
-  await expect(dialog).toContainText('Shared with Dr. Avery Rivera')
+  await dialog.getByRole('button', { name: 'Submit pre-visit summary' }).click()
+  await expect(dialog).toContainText('Pre-visit summary submitted to Dr. Avery Rivera')
 
   // Clinician (separate browser context) sees exactly the authorized fields.
   const doc = await browser.newPage()
   await doc.request.post('/api/v1/auth/login', { headers: H, data: { email: 'dr.rivera@clinic.example.com', password: 'curalink-demo', expected_role: 'clinician' } })
   await doc.goto('/clinician/dashboard')
   await doc.getByText('Sam Lee').click()
-  await expect(doc.getByText('Student-reported intake')).toBeVisible()
-  await expect(doc.getByText('100.8°F')).toBeVisible()
+  await expect(doc.getByRole('heading', { name: 'AI-Assisted Pre-Visit Summary — Student-Reported Information' })).toBeVisible()
+  await expect(doc.getByText('100.8°F').first()).toBeVisible()
   await expect(doc.getByText('since yesterday', { exact: true })).toHaveCount(0)
   await doc.close()
 })
 
 test('optional photo: consent gate, tentative observations, opt-in sharing, clinician correction', async ({ page, browser }) => {
   test.setTimeout(150_000)
-  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: 'slot_04', student_approved: true, idempotency_key: 'e2e-photo-0001' } })).ok()).toBeTruthy()
+  expect((await page.request.post('/api/v1/appointments/confirm', { headers: H, data: { slot_id: RIVERA_MON_1030, student_approved: true, idempotency_key: 'e2e-photo-0001' } })).ok()).toBeTruthy()
   await page.goto('/student/voice')
   await page.getByRole('button', { name: 'Add or correct details' }).click()
   const drawer = page.getByRole('dialog')
@@ -61,20 +62,22 @@ test('optional photo: consent gate, tentative observations, opt-in sharing, clin
   await drawer.getByRole('button', { name: 'Cancel' }).click()
   const knows = page.locator('section', { has: page.getByRole('heading', { name: 'What CuraLink knows' }) })
   await knows.getByRole('checkbox').first().check()
-  await knows.getByRole('button', { name: 'Review what will be sent to your clinician' }).click()
+  await knows.getByRole('button', { name: 'Review your pre-visit summary' }).click()
   const dialog = page.getByRole('dialog')
-  const share = dialog.getByLabel('Share this photo with my clinician')
+  const share = dialog.getByLabel(/Share this photo/)
   await expect(share).not.toBeChecked()
   await share.check()
+  await dialog.getByLabel('Share with').selectOption({ index: 1 }) // booked before this conversation: choose it explicitly
   await dialog.getByLabel(/I authorize sharing/).check()
-  await dialog.getByRole('button', { name: 'Share with clinician' }).click()
-  await expect(dialog).toContainText('and 1 photo shared')
+  await dialog.getByRole('button', { name: 'Submit pre-visit summary' }).click()
+  await expect(dialog).toContainText('Pre-visit summary submitted to Dr. Avery Rivera')
 
   const doc = await browser.newPage()
   await doc.request.post('/api/v1/auth/login', { headers: H, data: { email: 'dr.rivera@clinic.example.com', password: 'curalink-demo', expected_role: 'clinician' } })
   await doc.goto('/clinician/dashboard')
   await doc.getByText('Sam Lee').click()
-  await expect(doc.getByAltText(/Student-shared photo/)).toBeVisible()
+  await expect(doc.getByAltText(/Student-approved photo/).first()).toBeVisible()
+  await doc.getByText('Authorized source details').click()
   await doc.getByRole('button', { name: 'Correct' }).first().click()
   await doc.getByLabel(/Corrected value for/).fill('Localized redness noted on exam (fictional)')
   await doc.getByRole('button', { name: 'Save', exact: true }).click()

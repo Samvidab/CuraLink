@@ -32,7 +32,7 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
     db.execute(delete(Course).where(Course.student_id == student.id, Course.provenance != "manual"))
     manual = {c.code: c for c in db.scalars(select(Course).where(Course.student_id == student.id))}
 
-    cal = Calendar(
+    cal = Calendar(selected_term=None,
         id=f"cal_{uuid4().hex[:10]}",
         student_id=student.id,
         source_mode=source_mode,
@@ -43,13 +43,14 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
     )
     db.add(cal)
 
-    courses: dict[str, Course] = dict(manual)
+    # Courses are per (code, term): the same code in two semesters is two separate course records.
+    courses: dict[tuple[str, str | None], Course] = {(c.code, c.term): c for c in manual.values()}
     for occ in parsed.occurrences:
-        if not occ.course_code or occ.course_code in courses:
+        if not occ.course_code or (occ.course_code, occ.term) in courses:
             continue
         match = instructor_directory.resolve(occ.course_code, occ.section)
         # Instructor data from the student's own UniTime export wins over catalog/directory lookups.
-        instr = next((i for o in parsed.occurrences if o.course_code == occ.course_code for i in o.instructors), None)
+        instr = next((i for o in parsed.occurrences if o.course_code == occ.course_code and o.term == occ.term for i in o.instructors), None)
         if instr:
             name, email = instr
             status, provenance = ("VERIFIED" if email else "NEEDS_REVIEW"), "unitime_ics"
@@ -65,6 +66,7 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
             student_id=student.id,
             code=occ.course_code,
             section=occ.section,
+            term=occ.term,
             title=title,
             instructor_name=name,
             instructor_email=email,
@@ -73,7 +75,7 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
             color=match.color or _FALLBACK_COLORS[len(courses) % len(_FALLBACK_COLORS)],
         )
         db.add(course)
-        courses[occ.course_code] = course
+        courses[(occ.course_code, occ.term)] = course
     db.flush()
 
     for occ in parsed.occurrences:
@@ -83,7 +85,7 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
                 calendar_id=cal.id,
                 student_id=student.id,
                 uid=occ.uid,
-                course_id=courses[occ.course_code].id if occ.course_code else None,
+                course_id=courses[(occ.course_code, occ.term)].id if occ.course_code else None,
                 summary=occ.summary,
                 start_at=occ.start_at,
                 end_at=occ.end_at,
@@ -93,6 +95,7 @@ def import_calendar(db: Session, student: User, data: bytes, *, filename: str | 
                 all_day=occ.all_day,
                 kind="class" if occ.course_code else "other",
                 source=source_mode,
+                term=occ.term,
             )
         )
     audit.record(

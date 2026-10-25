@@ -8,6 +8,20 @@ from app.seed import DEMO_PASSWORD, reset_demo
 HEADERS = {"X-CuraLink-Client": "web"}
 
 
+@pytest.fixture(autouse=True)
+def _no_live_integrations(monkeypatch):
+    """Tests never call real services, even if the developer's .env has keys. Tests that need a
+    'live' path stub it explicitly."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "anthropic_api_key", None)
+    monkeypatch.setattr(get_settings(), "cartesia_api_key", None)
+    from app.services import llm_gateway
+
+    monkeypatch.setitem(llm_gateway.STATUS, "auth_failed", False)
+    monkeypatch.setitem(llm_gateway.STATUS, "last_error", None)
+
+
 @pytest.fixture()
 def app():
     dbmod.configure("sqlite://")
@@ -50,3 +64,15 @@ def login(app):
         return c, r
 
     return _login
+
+
+def slot(clinician_id: str = "demo-clinician-1", local: str = "2026-10-26T10:30", appointment_type: str = "general_consultation") -> str:
+    """Build an availability slot id (clinician|UTC start|type) from a local Indianapolis time."""
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    start = datetime.fromisoformat(local).replace(tzinfo=ZoneInfo("America/Indiana/Indianapolis")).astimezone(UTC)
+    return f"{clinician_id}|{start.strftime('%Y-%m-%dT%H:%MZ')}|{appointment_type}"
+
+
+RIVERA_MON_1030 = slot()

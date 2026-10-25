@@ -42,8 +42,15 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def start_session(db: Session, response: Response, user: User) -> None:
+def start_session(db: Session, request: Request, response: Response, user: User) -> None:
+    """Every sign-in gets a NEW server session; any session this browser already held is revoked first,
+    so switching accounts can never keep the previous identity alive."""
     settings = get_settings()
+    old = request.cookies.get(settings.session_cookie_name)
+    if old:
+        row = db.get(AuthSession, _token_hash(old))
+        if row and row.revoked_at is None:
+            row.revoked_at = utcnow()
     token = secrets.token_urlsafe(32)
     db.add(AuthSession(token_hash=_token_hash(token), user_id=user.id, expires_at=utcnow() + timedelta(minutes=settings.session_ttl_minutes)))
     db.commit()
@@ -53,7 +60,8 @@ def start_session(db: Session, response: Response, user: User) -> None:
         httponly=True,
         samesite="lax",
         secure=settings.cookie_secure,
-        max_age=settings.session_ttl_minutes * 60,
+        # No max_age: a browser-session cookie (kept across refreshes, gone when the browser closes), so a
+        # shared demo machine doesn't silently reopen the last person's portal. The server TTL still applies.
         path="/",
     )
 

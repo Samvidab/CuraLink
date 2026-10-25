@@ -11,12 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import IntakeField, IntakeSession, User
-from app.services import audit, llm_gateway, safety
-from app.services.intake_fields import REQUESTED_FOR_HANDOFF, FieldError, extract, validate
+from app.services import audit, dialog, llm_gateway, safety
+from app.services import names as profile_names
+from app.services.intake_fields import REQUESTED_FOR_HANDOFF, FieldError, display, extract, validate
 from app.timeutil import utcnow
 
-_APPOINTMENT = re.compile(r"\b(appointment|book|doctor|clinic|see (someone|a|the)|nurse|checkup|check-up|get seen|vaccin\w*)\b", re.I)
-_ABSENCE = re.compile(r"\b(miss(ing)? (class|classes|lecture|lab)|absen\w+|excuse\w*|professor|instructor|note for)\b", re.I)
 _SERVICES = re.compile(r"\b(what services|services does|offer)\b", re.I)
 _MENTAL = re.compile(r"\b(mental health|counsel\w*|therap\w*|anxiety|stress|depress\w*)\b", re.I)
 _BRING = re.compile(r"\b(what should i bring|bring to (my|the) appointment)\b", re.I)
@@ -33,6 +32,11 @@ class Reply:
     field_updates: list[str] = field(default_factory=list)
     missing_fields: list[str] = field(default_factory=list)
     mode: str = "scripted"  # claude | scripted | safety
+    conversation_state: str = "GREETING"
+    form: dict | None = None  # contextual form to open, e.g. {"fields": ["temperature"]}
+    turn_id: str | None = None
+    fallback_reason: dict | None = None
+    schedule: dict | None = None  # REAL clinician + time options from the scheduling backend
 
 
 def current_session(db: Session, student: User, create: bool = True) -> IntakeSession | None:
@@ -44,6 +48,20 @@ def current_session(db: Session, student: User, create: bool = True) -> IntakeSe
         db.add(sess)
         db.commit()
     return sess
+
+
+def close_untranscribed_sessions(db: Session) -> int:
+    """Upgrade step: conversations started before transcripts were kept can't be shown on reopening, so continuing
+    them would silently reuse old answers. End them (nothing is deleted); the student's next visit starts fresh."""
+    n = 0
+    for sess in db.scalars(select(IntakeSession).where(IntakeSession.status == "OPEN")).all():
+        conv = sess.conversation or {}
+        if conv.get("turn", 0) > 0 and "transcript" not in conv:
+            sess.status, sess.ended_at = "CLOSED", sess.ended_at or sess.updated_at
+            n += 1
+    if n:
+        db.commit()
+    return n
 
 
 def fields_of(db: Session, sess: IntakeSession) -> dict[str, IntakeField]:
@@ -96,77 +114,169 @@ def _apply_proposed(db: Session, sess: IntakeSession, proposed: list[dict], chan
     return updated
 
 
-def _scripted(text: str, updated: list[str], notes: list[str], miss: list[str], has_calendar: bool) -> tuple[str, list[str]]:
-    actions: list[str] = []
-    parts: list[str] = []
-    if "temperature_unit_missing" in notes:
-        parts.append("Was that temperature in °F or °C? I won't guess the unit.")
-    if "temperature_out_of_range" in notes:
-        parts.append("That temperature reading looks unusual — could you re-check it and enter it in the form?")
-    if updated:
-        parts.append("Thanks — I've added that to “What CuraLink knows” in your own words so you can review it.")
-    if _BRING.search(text):
-        parts.append("For this demo, bring your student ID, insurance card if you have one, a list of current medications, and any questions. Check the official health center site for the real requirements.")
-    elif _MENTAL.search(text) and not updated:
-        parts.append("Purdue students can explore counseling and psychological support through official campus resources. I can also show demo mental-health appointment times that fit your classes.")
-        actions.append("FIND_CARE")
-    elif _SERVICES.search(text):
-        parts.append("For this demo, the campus health center may offer routine visits, vaccinations, mental health support and general consultations. Please verify current services on the official university health website.")
-    if _APPOINTMENT.search(text) or (updated and "symptoms_free_text" in updated):
-        actions.append("FIND_CARE")
-        if not has_calendar:
-            actions.append("IMPORT_CALENDAR")
-            parts.append("Import your UniTime calendar and I'll only suggest demo appointment times that don't clash with classes.")
-        else:
-            parts.append("I can show demo appointment times that fit around your classes.")
-    if _ABSENCE.search(text):
-        actions.append("START_CASE")
-        parts.append("For missed classes, your clinician decides whether to document an absence and for which dates — I'll help you share the details with them.")
-    if miss and updated:
-        ask = {"onset_text": "when it started", "temperature": "your temperature if you've measured it", "symptoms_free_text": "what you're experiencing"}
-        parts.append(f"If you can, tell me {' and '.join(ask[m] for m in miss[:2])} — or use the form. You can skip anything.")
-        actions.append("OPEN_INTAKE_FORM")
-    if not parts:
-        parts.append("I can help you describe what's going on for a clinician, find a demo appointment that fits your classes, and prepare absence paperwork for your clinician to review. I can't diagnose or decide how urgent something is.")
-    return " ".join(parts), list(dict.fromkeys(actions))
+def _schedule_context(db: Session, student: User):
+    from app.models import Appointment
+    from app.services import availability
+
+    names = [(p.clinician_id, availability.profile_out(db, p)["name"]) for p in availability.active_profiles(db)]
+    last = db.scalar(select(Appointment.clinician_id).where(Appointment.student_id == student.id, Appointment.clinician_id.is_not(None)).order_by(Appointment.created_at.desc()))
+    return names, last
 
 
-async def handle_message(db: Session, student: User, sess: IntakeSession, text: str, channel: str, history: list[dict], tool_handler) -> Reply:
+def _appointment_type_for(conv: dict, sched: dict) -> str:
+    if sched.get("appointment_type"):
+        return sched["appointment_type"]
+    concerns = set(conv.get("concerns", []))
+    return "general_consultation" if "symptom" in concerns else "routine_checkup"
+
+
+def _run_search(db: Session, student: User, conv: dict, sched: dict) -> dict:
+    from datetime import date as _date
+
+    from app.routers.scheduling import SearchIn, search
+
+    req = SearchIn(appointment_type=_appointment_type_for(conv, sched), clinician_id=sched.get("clinician_id"), attribute=sched.get("attribute"),
+                   start=_date.fromisoformat(sched["start"]) if sched.get("start") else None, days=sched.get("days", 5),
+                   part_of_day=sched.get("part_of_day", "any"), sort=sched.get("sort", "best"), per_clinician=4)
+    result = search(db, student, req)
+    result["options"] = result["options"][:6]
+    return result
+
+
+def _field_displays(db: Session, sess: IntakeSession) -> dict[str, str]:
+    return {k: display(k, f.value) for k, f in fields_of(db, sess).items()}
+
+
+def _has_photo(db: Session, sess: IntakeSession) -> bool:
+    from app.models import Attachment
+
+    return db.scalar(select(Attachment.id).where(Attachment.session_id == sess.id)) is not None
+
+
+TRANSCRIPT_LIMIT = 80
+
+
+def _remember(db: Session, sess: IntakeSession, conv: dict, client_turn_id: str | None, reply: "Reply", text: str = "", channel: str = "text") -> "Reply":
+    if client_turn_id:
+        cache = dict(conv.get("processed", {}))
+        cache[client_turn_id] = {k: v for k, v in reply.__dict__.items()}
+        conv["processed"] = dict(list(cache.items())[-10:])
+    # What was said on screen in THIS conversation (text and voice alike), so reopening shows it instead of a
+    # blank chat silently continuing. Shown only to the student; never part of a clinician summary.
+    now = utcnow().isoformat()
+    conv["transcript"] = (list(conv.get("transcript", [])) + [
+        {"from": "user", "text": text, "channel": channel, "at": now},
+        {"from": "ai", "text": reply.assistant_message, "actions": reply.next_actions, "form": reply.form, "had_schedule": bool(reply.schedule), "at": now},
+    ])[-TRANSCRIPT_LIMIT:]
+    sess.chief_concern = conv.get("chief_concern") or sess.chief_concern
+    sess.purpose = conv.get("purpose") or sess.purpose
+    sess.absence_requested = bool(conv.get("absence_requested")) or bool(sess.absence_requested)
+    sess.updated_at = utcnow()
+    sess.conversation = dict(conv)  # reassign so SQLAlchemy persists the JSON change
+    db.commit()
+    return reply
+
+
+async def handle_message(db: Session, student: User, sess: IntakeSession, text: str, channel: str, history: list[dict], tool_handler, client_turn_id: str | None = None) -> Reply:
     text = (text or "").strip()[:2000]
+    conv = dict(sess.conversation or dialog.blank())
+    if client_turn_id and client_turn_id in conv.get("processed", {}):
+        return Reply(**conv["processed"][client_turn_id])  # duplicate submit / repeated speech event: same answer, no re-processing
+    turn_id = client_turn_id or f"t{conv.get('turn', 0) + 1}"
     if sess.safety_state == "EMERGENCY_GUIDANCE":
         # Routine flow stays paused on every channel until the student acknowledges the notice.
-        return Reply(sess.id, safety.EMERGENCY_MESSAGE, "EMERGENCY_GUIDANCE", None, ["EMERGENCY_HELP"], mode="safety")
+        return Reply(sess.id, safety.EMERGENCY_MESSAGE, "EMERGENCY_GUIDANCE", None, ["EMERGENCY_HELP"], mode="safety", conversation_state=conv.get("state", "GREETING"), turn_id=turn_id)
     check = safety.screen(text)
     if check.state == "EMERGENCY_GUIDANCE":
         sess.safety_state = "EMERGENCY_GUIDANCE"
         audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="SAFETY_ESCALATION_SHOWN", object_type="intake_session", object_id=sess.id, detail=check.category)
-        db.commit()
-        return Reply(sess.id, check.message or "", "EMERGENCY_GUIDANCE", check.category, ["EMERGENCY_HELP"], mode="safety")
+        return _remember(db, sess, conv, client_turn_id, Reply(sess.id, check.message or "", "EMERGENCY_GUIDANCE", check.category, ["EMERGENCY_HELP"], mode="safety", conversation_state=conv.get("state", "GREETING"), turn_id=turn_id), text, channel)
 
     from app.models import Calendar  # local import keeps module import graph simple
 
     has_calendar = db.scalar(select(Calendar.id).where(Calendar.student_id == student.id)) is not None
-    if llm_gateway.available():
-        context = f"demo date {get_settings().demo_today.isoformat()}; calendar imported: {has_calendar}; channel: {channel}; missing intake fields: {', '.join(missing(db, sess)) or 'none'}"
+    dialog.note_context(conv, text)
+    names, last = _schedule_context(db, student)
+    sched = dialog.scheduling_intent(conv, text, names, get_settings().demo_today, last)  # uses the PREVIOUS state
+    live = llm_gateway.available()
+    fallback_reason = None if live else (llm_gateway.detail() if get_settings().anthropic_api_key else None)
+
+    # 1) Deterministic extraction. Scripted mode stores it; Claude mode only uses it to decide the next step
+    #    (Claude's own validated proposals are what get stored).
+    extracted, notes = extract(text)
+    looks_like_onset = bool(dialog.TIME_WORDS.search(text)) or not dialog.describes_concern(text)  # "swollen and bruised" isn't a time
+    if conv.get("pending") == "onset_text" and not any(e.key == "onset_text" for e in extracted) and len(text) <= 80 and not dialog.DECLINE.search(text) and looks_like_onset:
+        from app.services.intake_fields import Extracted
+
+        # A short direct answer to "When did this start?" is the onset, in the student's own words.
+        extracted = [e for e in extracted if e.key != "symptoms_free_text"] + [Extracted("onset_text", {"text": text})]
+    if live:
+        updated = [e.key for e in extracted]
+        displays = {**_field_displays(db, sess), **{e.key: display(e.key, e.value) for e in extracted}}
+    else:
+        updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
+        db.flush()
+        displays = _field_displays(db, sess)
+
+    # 2) ONE decision for both modes: which follow-up and which structured component (temperature card,
+    #    photo card, scheduling cards). Made before Claude speaks so its words match what's on screen.
+    plan = dialog.plan(conv, text, updated, displays, _has_photo(db, sess), has_calendar, notes)
+    conv["state"] = plan.state
+    actions, form = list(plan.actions), plan.form
+    schedule = None
+    if sched is not None:
+        schedule = _run_search(db, student, conv, sched)  # real lookup against stored availability
+        conv["state"] = "COORDINATING_APPOINTMENT"
+        offers = [a for a in actions if a in (dialog.OFFER_TEMPERATURE, dialog.OFFER_PHOTO)]
+        if not offers:  # a pure scheduling turn: no pending follow-up
+            conv["pending"], form = None, None
+        actions = list(dict.fromkeys([dialog.SCHEDULING, *offers] + ([] if has_calendar else ["IMPORT_CALENDAR"])))
+
+    if live:
+        name = profile_names.address_name(student)
+        context = (f"demo date {get_settings().demo_today.isoformat()}; calendar imported: {has_calendar}; channel: {channel}; "
+                   + (f"student's preferred name: {name}; " if name else "")
+                   + dialog.context_for_model(conv, _field_displays(db, sess)) + " " + dialog.directive(plan)
+                   + (" Real appointment options are on screen as clinician cards; summarize them briefly." if schedule else ""))
+        tool_handler.sched_type = _appointment_type_for(conv, sched or {})
         try:
             turn = await llm_gateway.run_turn(history, text, context, tool_handler)
-            updated = _apply_proposed(db, sess, turn.proposed_fields, channel)
+            claude_updated = _apply_proposed(db, sess, turn.proposed_fields, channel)
             reply_text, guarded = safety.guard_output(turn.text or "")
             if guarded:
                 audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_OUTPUT_GUARDED", object_type="intake_session", object_id=sess.id)
-            miss = missing(db, sess)
-            _, scripted_actions = _scripted(text, updated, [], miss, has_calendar)
-            # Model-requested UI actions first; deterministic intent rules backfill.
-            actions = list(dict.fromkeys(turn.ui_actions + scripted_actions))
-            db.commit()
-            return Reply(sess.id, reply_text or "Okay.", "GENERAL_SUPPORT", None, actions, turn.tool_events, updated, miss, "claude")
+            reply_text = dialog.avoid_repeat(conv, reply_text or plan.text, plan.text)
+            schedule = schedule or getattr(tool_handler, "last_schedule", None)
+            extra = [a for a in turn.ui_actions if a in (dialog.SCHEDULING, "START_CASE", "IMPORT_CALENDAR")]
+            if schedule:
+                conv["state"] = "COORDINATING_APPOINTMENT"
+                extra.append(dialog.SCHEDULING)
+            actions = list(dict.fromkeys(actions + extra))
+            reply = Reply(sess.id, reply_text, "GENERAL_SUPPORT", None, actions, turn.tool_events, claude_updated, missing(db, sess), "claude", conv["state"], form, turn_id, None, schedule)
+            return _remember(db, sess, conv, client_turn_id, reply, text, channel)
         except llm_gateway.LlmUnavailable as exc:
             audit.record(db, actor_role="system", actor_id=None, subject_student_id=student.id, action="LLM_FALLBACK", detail=str(exc)[:40])
+            fallback_reason = llm_gateway.detail() or {"category": str(exc), "http_status": None, "error_type": None, "message": ""}
+            # Same decision, scripted words: store what the deterministic extractor found.
+            updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
 
-    extracted, notes = extract(text)
-    updated = [e.key for e in extracted if upsert(db, sess, e.key, e.value, channel, confirmed=False)]
-    miss = missing(db, sess)
-    reply_text, actions = _scripted(text, updated, notes, miss, has_calendar)
-    db.commit()
-    return Reply(sess.id, reply_text, "GENERAL_SUPPORT", None, actions, [], updated, miss, "scripted")
+    text_out = _resources(text) if not updated and not plan.pending and plan.state == "COLLECTING_INITIAL_CONCERN" and _resources(text) else plan.text
+    if schedule is not None:  # the reply text summarises what the backend actually returned
+        ack = dialog._ack(updated, _field_displays(db, sess))
+        follow = plan.text if form else ""
+        text_out = " ".join(x for x in (ack, dialog.describe_schedule(schedule, sched or {}), follow if follow != ack else "") if x)
+    text_out = dialog.avoid_repeat(conv, text_out, "Would you like to review your information, find an appointment, or add something else?")
+    reply = Reply(sess.id, text_out, "GENERAL_SUPPORT", None, actions, [], updated, missing(db, sess), "scripted", conv["state"], form, turn_id, fallback_reason, schedule)
+    return _remember(db, sess, conv, client_turn_id, reply, text, channel)
+
+
+def _resources(text: str) -> str | None:
+    """General campus-navigation answers (non-diagnostic)."""
+    if _BRING.search(text):
+        return "For this demo, bring your student ID, insurance card if you have one, a list of current medications, and any questions. Check the official health center site for the real requirements."
+    if _MENTAL.search(text):
+        return "Purdue students can explore counseling and psychological support through official campus resources. I can also show demo mental-health appointment times that fit your classes."
+    if _SERVICES.search(text):
+        return "For this demo, the campus health center may offer routine visits, vaccinations, mental health support and general consultations. Please verify current services on the official university health website."
+    return None
 

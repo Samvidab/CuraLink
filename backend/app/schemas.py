@@ -12,7 +12,7 @@ Role = Literal["student", "clinician"]
 class IntegrationStatus(BaseModel):
     clinic_inventory: Literal["demo"] = "demo"
     email_delivery: Literal["test_only"] = "test_only"
-    llm: Literal["live", "fallback"]
+    llm: Literal["live", "fallback", "error"]
     voice: Literal["live", "fallback"]
 
 
@@ -21,6 +21,7 @@ class Health(BaseModel):
     demo_mode: bool
     demo_today: str
     integrations: IntegrationStatus
+    llm_detail: dict | None = None  # sanitized last Claude failure: category, http_status, error_type, message
 
 
 class DemoResetOut(BaseModel):
@@ -54,16 +55,36 @@ class MeOut(BaseModel):
     demo: bool
     credentials: str | None = None
     permissions: list[str]
+    first_name: str | None = None
+    last_name: str | None = None
+    preferred_name: str | None = None
+    clinical_role: str | None = None
+    profile_complete: bool = False
 
 
 class ProfileIn(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
+    first_name: str = Field(max_length=80)
+    last_name: str = Field(max_length=80)
+    preferred_name: str | None = Field(None, max_length=80)
+
+
+class RegisterIn(BaseModel):
+    email: str = Field(max_length=254)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class ClinicianRegisterIn(RegisterIn):
+    first_name: str = Field(max_length=80)
+    last_name: str = Field(max_length=80)
+    credentials: str = Field(min_length=1, max_length=80)
+    clinical_role: str = Field(min_length=1, max_length=80)
 
 
 class CourseOut(BaseModel):
     id: str
     code: str
     section: str | None
+    term: str | None = None
     title: str | None
     instructor_name: str | None
     instructor_email: str | None
@@ -82,6 +103,7 @@ class CalendarEventOut(BaseModel):
     location: str | None
     all_day: bool
     kind: str
+    term: str | None = None
     rescheduled: bool
     source: SourceMode | str
 
@@ -109,6 +131,7 @@ class CalendarEventsOut(BaseModel):
     events: list[CalendarEventOut]
     timezone: str
     calendar: CalendarSummary | None
+    term: str | None = None
 
 
 class ActivityOut(BaseModel):
@@ -128,6 +151,8 @@ class ActivityOut(BaseModel):
 class AppointmentSummary(BaseModel):
     id: str
     state: str
+    clinician_id: str | None = None
+    clinician_name: str | None = None
     appointment_type: str
     clinic_name: str
     location: str
@@ -139,6 +164,7 @@ class AppointmentSummary(BaseModel):
 
 class StudentDashboard(BaseModel):
     today: str
+    term: str | None = None
     timezone: str
     display_name: str
     calendar: CalendarSummary | None
@@ -171,33 +197,10 @@ class EncounterDetail(EncounterRow):
     student_id: str
     student_email: str
     appointment_id: str | None
-
-
-
-class AppointmentType(BaseModel):
-    id: str
-    label: str
-
-
-class SlotOut(BaseModel):
-    id: str
-    clinic_id: str
-    clinic_name: str
-    location: str
-    appointment_type: str
-    starts_at: datetime
-    ends_at: datetime
-    travel_minutes: int
-    status: str
-    permitted: bool
-    source_mode: SourceMode | str
-
-
-class SlotsOut(BaseModel):
-    slots: list[SlotOut]
-    inventory_updated_at: str
-    source_mode: SourceMode | str
-    appointment_types: list[AppointmentType]
+    purpose: str | None = None  # student's stated reason, verbatim (detail view only; list rows stay symptom-free)
+    absence_requested: bool = False  # requested by the student; never an approval
+    ends_at: datetime | None = None
+    location: str | None = None
 
 
 class SchedulePreferences(BaseModel):
@@ -206,58 +209,6 @@ class SchedulePreferences(BaseModel):
     max_travel_minutes: int | None = Field(None, ge=0, le=240)
     earliest_hour: int | None = Field(None, ge=0, le=23)
     latest_hour: int | None = Field(None, ge=1, le=24)
-
-
-class RecommendationIn(BaseModel):
-    appointment_type: str | None = None
-    start: str | None = None  # YYYY-MM-DD (local); defaults to demo today
-    days: int = Field(5, ge=1, le=21)
-    preferences: SchedulePreferences = SchedulePreferences()
-
-
-class ConflictOut(BaseModel):
-    label: str
-    event_id: str | None
-    kind: Literal["CLASS_OVERLAP", "TRAVEL_BUFFER", "PERSONAL_BLOCK"]
-    overlap_minutes: int
-
-
-class OptionOut(BaseModel):
-    rank: int
-    slot: SlotOut
-    score: float
-    reason_codes: list[str]
-    conflicts: list[ConflictOut]
-    source_mode: SourceMode | str
-
-
-class RejectedOut(BaseModel):
-    slot: SlotOut
-    reason_code: str
-    conflicts: list[ConflictOut]
-
-
-class RecommendationsOut(BaseModel):
-    options: list[OptionOut]
-    rejected: list[RejectedOut]
-    calendar_considered: bool
-    generated_at: datetime
-    source_mode: SourceMode | str
-    scoring: dict[str, float]
-
-
-class ConfirmIn(BaseModel):
-    slot_id: str
-    student_approved: bool
-    idempotency_key: str = Field(min_length=8, max_length=80)
-
-
-class ConfirmOut(BaseModel):
-    appointment_id: str
-    status: str
-    external_booking: bool = False
-    appointment: AppointmentSummary
-    message: str
 
 
 class BlockIn(BaseModel):
@@ -286,6 +237,17 @@ class IntakeSnapshot(BaseModel):
     fields: list[IntakeFieldOut]
     missing_fields: list[str]
     skipped_fields: list[str]
+    conversation_state: str = "GREETING"
+    declined: list[str] = Field(default_factory=list)  # student chose not to say
+    unknown: list[str] = Field(default_factory=list)  # student said they don't know / haven't measured
+    transcript: list[dict] = Field(default_factory=list)  # this conversation's on-screen messages (student only)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    chief_concern: str | None = None
+    purpose: str | None = None
+    absence_requested: bool = False
+    summary: dict | None = None  # latest submitted pre-visit summary for this session (status, version, sharing target)
+    linked_encounter_id: str | None = None  # appointment booked from this conversation, if any
 
 
 class ConsentIn(BaseModel):
@@ -303,6 +265,7 @@ class IntakeMessageIn(BaseModel):
     session_id: str | None = None
     message: str = Field(min_length=1, max_length=2000)
     channel: Literal["text", "voice"] = "text"
+    client_turn_id: str | None = Field(None, max_length=64)
     history: list[HistoryItem] = Field(default_factory=list, max_length=20)
 
 
@@ -316,6 +279,11 @@ class IntakeReplyOut(BaseModel):
     field_updates: list[str]
     missing_fields: list[str]
     mode: Literal["claude", "scripted", "safety"]
+    conversation_state: str = "GREETING"
+    form: dict | None = None
+    turn_id: str | None = None
+    fallback_reason: dict | None = None  # why Claude wasn't used for this reply (if a key is configured)
+    schedule: dict | None = None  # real clinician + time options (selectable in the chat)
 
 
 class FieldWrite(BaseModel):
@@ -337,14 +305,23 @@ class SkipIn(BaseModel):
 
 class HandoffIn(BaseModel):
     student_authorized: bool
-    field_keys: list[str] = Field(min_length=1, max_length=10)
+    field_keys: list[str] = Field(default_factory=list, max_length=10)
     attachment_ids: list[str] = Field(default_factory=list, max_length=5)
+
+
+class SummarySubmitIn(HandoffIn):
+    include_purpose: bool = False  # the student's own stated reason for the visit
+    include_absence_request: bool = False  # whether they asked about absence documentation (a request, not an approval)
+    encounter_id: str | None = None  # empty: the appointment booked from this conversation, else the next one booked
 
 
 class HandoffOut(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     packet_id: str
-    encounter_id: str
+    encounter_id: str | None
+    session_id: str | None = None
+    consent_text: str | None = None
+    clinician_name: str | None = None
     version: int
     status: str
     shared_at: datetime
@@ -372,6 +349,9 @@ class ClinicianIntakeOut(BaseModel):
     consent: dict[str, bool]
     attachments: list[dict] = Field(default_factory=list)
     annotations: dict[str, dict] = Field(default_factory=dict)
+    summary: dict | None = None  # structured AI-assisted pre-visit summary (student-reported only)
+    session: dict | None = None  # which conversation it came from, and when
+    consent_text: str | None = None
 
 
 class VoiceSessionIn(BaseModel):
